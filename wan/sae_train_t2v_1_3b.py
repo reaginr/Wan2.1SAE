@@ -18,8 +18,14 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
+import sys
 import time
 from typing import Dict, List
+
+# 修复模块导入路径：将项目根目录添加到 sys.path
+# 这样无论从哪运行此脚本，都能正确找到 wan 模块
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.cuda.amp as amp
@@ -53,13 +59,13 @@ path_params = {
     # 学术意义: DiT (Diffusion Transformer) 预训练权重，作为 SAE 可解释性分析的基础模型
     # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录
     # 建议值: "./Wan2.1-T2V-1.3B" 或绝对路径
-    "checkpoint_dir": "",
+    "checkpoint_dir": "~/Wan/Wan2.1-T2V-1.3B",
 
     # prompt_dir: 提示词文件夹路径
     # 学术意义: 用于激活 DiT 特定神经元的输入文本集合，NSFW 内容有助于激活特定概念神经元
     # 实际用法: 文件夹内包含多个 .txt 文件，每行一个提示词
     # 建议值: 准备至少 1000+ 条多样化提示词以获得更好的激活覆盖
-    "prompt_dir": "",
+    "prompt_dir": "~/Wan2.1-main/Wan2.1-main/final_cleaned",
 
     # run_dir: SAE 训练输出目录
     # 学术意义: 实验追踪与可复现性，每个实验应有独立的输出目录
@@ -120,7 +126,7 @@ training_params = {
     # 学术意义: 决定 SAE 收敛程度，太少会欠拟合，太多可能过拟合训练分布
     # 实际用法: 每一步处理 batch_prompts 个提示词，跑完整 sampling_steps 个 diffusion timestep
     # 建议值: 2000~5000，可观察 loss 曲线决定提前停止
-    "steps": 2000,
+    "steps": 500,
 
     # batch_prompts: 每步使用的提示词数量
     # 学术意义: 决定每步的样本多样性，影响梯度估计的方差
@@ -132,7 +138,7 @@ training_params = {
     # 学术意义: 限制数据集大小，避免内存溢出，也用于快速验证实验
     # 实际用法: 从 prompt_dir 中最多加载这么多条有效提示词
     # 建议值: 2000~10000，完整实验建议用全部数据
-    "max_prompts": 2000,
+    "max_prompts": 1000,
 
     # sampling_steps: 每个 batch 的 diffusion 采样步数
     # 学术意义: 决定 DiT 前向传播深度，覆盖扩散过程的不同噪声水平
@@ -175,7 +181,7 @@ training_params = {
     # 学术意义: 实验容错与中间结果分析，便于从中断恢复或选择最优 checkpoint
     # 实际用法: 每这么多 step 保存一次 sae_step{step}.pt
     # 建议值: 200~500，太频繁会增加 IO 开销
-    "save_every": 200,
+    "save_every": 50,
 }
 
 # --------------------------- Hook 配置 ---------------------------

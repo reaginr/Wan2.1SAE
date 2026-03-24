@@ -1,6 +1,7 @@
 # Installation Guide
 
 ## Install with pip
+-- 你必须使用python 3.12版本，这个版本的依赖冲突最小，而且能够通过命令直装flash-attn库 --
 
 ```bash
 pip install .
@@ -31,6 +32,10 @@ poetry install
 #### Install from Git (Alternative)
 ```bash
 poetry run pip install git+https://github.com/Dao-AILab/flash-attention.git
+```
+or
+```bash
+pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
 ```
 
 ---
