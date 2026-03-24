@@ -233,7 +233,7 @@ memory_params = {
     # 学术意义: 训练 SAE 时不需要更新文本编码器，可卸载以节省显存给 DiT 和 SAE
     # 实际用法: 每步文本编码后执行 .cpu()，需要时再 .to(device)
     # 建议值: True（8GB 以下显存强烈推荐）或 False（显存充足时减少数据传输）
-    "offload_text_encoder": False,
+    "offload_text_encoder": True,
 
     # empty_cache_every: 显存清理频率
     # 学术意义: 防止 PyTorch 显存碎片累积导致的 OOM
