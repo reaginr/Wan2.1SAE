@@ -65,7 +65,7 @@ path_params = {
     # 学术意义: 用于激活 DiT 特定神经元的输入文本集合，NSFW 内容有助于激活特定概念神经元
     # 实际用法: 文件夹内包含多个 .txt 文件，每行一个提示词
     # 建议值: 准备至少 1000+ 条多样化提示词以获得更好的激活覆盖
-    "prompt_dir": "../final_cleaned",
+    "prompt_dir": "final_cleaned",
 
     # run_dir: SAE 训练输出目录
     # 学术意义: 实验追踪与可复现性，每个实验应有独立的输出目录
@@ -430,6 +430,25 @@ def main():
             min_len=prompt_clean_params["min_len"],
             max_len=prompt_clean_params["max_len"],
         )
+
+    # 自动将相对路径转换为相对于脚本位置的绝对路径
+    # 这样无论从哪里运行脚本，路径都能正确解析
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)  # wan/ 的上级是项目根目录
+
+    def resolve_path(path: str) -> str:
+        """将相对路径转换为绝对路径（相对于脚本位置）"""
+        if not path:
+            return path
+        # 如果是绝对路径或包含 ~ 的路径，保持不变（由 os.path.expanduser 处理）
+        if os.path.isabs(path) or path.startswith("~"):
+            return path
+        # 相对路径：解释为相对于项目根目录
+        return os.path.join(project_root, path)
+
+    cfg_run.checkpoint_dir = resolve_path(cfg_run.checkpoint_dir)
+    cfg_run.prompt_dir = resolve_path(cfg_run.prompt_dir)
+    cfg_run.ckpt.run_dir = resolve_path(cfg_run.ckpt.run_dir)
 
     # 打印配置
     _print_config()

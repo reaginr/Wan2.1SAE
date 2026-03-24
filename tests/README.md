@@ -83,4 +83,4 @@ screen -S wan
 **这样推出会话即可**
 
 vim ~/Wan2.1-main/Wan2.1-main/wan/sae_train_t2v_1_3b.py
-python ~/Wan2.1-main/Wan2.1-main/wan/sae_train_t2v_1_3b.py
+python ~/Wan2.1SAE/wan/sae_train_t2v_1_3b.py
