@@ -37,12 +37,7 @@ from wan.sae.hooking import HookMode, pack_hook_batch, register_dit_hooks, remov
 from wan.sae.prompt_io import PromptCleanConfig, batch_iter, load_prompts_from_dir
 from wan.sae.sae_run_naming import SAERunLocator, load_json, save_json, train_state_path
 from wan.text2video import WanT2V
-from wan.utils.fm_solvers import (
-    FlowDPMSolverMultistepScheduler,
-    get_sampling_sigmas,
-    retrieve_timesteps,
-)
-from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+# 使用 diffusers 的 Euler 调度器（更简单可靠，避免多步调度器的边界问题）
 
 
 logger = logging.getLogger(__name__)
@@ -146,12 +141,10 @@ training_params = {
     # 建议值: 30~50，越多覆盖噪声范围越完整，但训练时间线性增加
     "sampling_steps": 30,
 
-    # sample_solver: 扩散采样器
-    # 学术意义: 不同采样器影响 latent 轨迹分布，进而影响 SAE 学习的特征分布
-    # 实际用法: UniPC 更稳定，DPM++ 可能更快收敛
-    # 可选值: "unipc" | "dpm++"
-    # 建议值: "dpm++"（UniPC 在训练模式下有状态管理问题）
-    "sample_solver": "dpm++",
+    # sample_solver: (已弃用) 现在固定使用 Euler 调度器
+    # 说明: 多步调度器（UniPC/DPM++）在训练模式下有复杂的边界问题
+    # 修复: 改用 diffusers.FlowMatchEulerDiscreteScheduler，简单可靠
+    "sample_solver": "euler",
 
     # shift: 噪声日程 shift 参数
     # 学术意义: 控制扩散过程的时间偏移，影响运动流畅度和生成稳定性
@@ -606,26 +599,14 @@ def main():
             ]
 
             # 4.4 构造时间步序列
-            if cfg_run.sample_solver == "unipc":
-                sample_scheduler = FlowUniPCMultistepScheduler(
-                    num_train_timesteps=cfg.num_train_timesteps,
-                    shift=1,
-                    use_dynamic_shifting=False,
-                )
-                sample_scheduler.set_timesteps(cfg_run.sampling_steps, device=device, shift=cfg_run.shift)
-                timesteps = sample_scheduler.timesteps
-            else:
-                sample_scheduler = FlowDPMSolverMultistepScheduler(
-                    num_train_timesteps=cfg.num_train_timesteps,
-                    shift=1,
-                    use_dynamic_shifting=False,
-                )
-                sampling_sigmas = get_sampling_sigmas(cfg_run.sampling_steps, cfg_run.shift)
-                timesteps, _ = retrieve_timesteps(
-                    sample_scheduler,
-                    device=device,
-                    sigmas=sampling_sigmas,
-                )
+            # 使用简单的 Euler 调度器，避免多步调度器的边界问题
+            from diffusers import FlowMatchEulerDiscreteScheduler
+            sample_scheduler = FlowMatchEulerDiscreteScheduler(
+                num_train_timesteps=cfg.num_train_timesteps,
+                shift=cfg_run.shift,
+            )
+            sample_scheduler.set_timesteps(cfg_run.sampling_steps, device=device)
+            timesteps = sample_scheduler.timesteps
 
             # CFG 准备
             if cfg_run.negative_prompt == "":
@@ -669,17 +650,16 @@ def main():
                             # 收集特征
                             hook_batch = pack_hook_batch(raw, max_tokens_per_key=cfg_run.hook.max_tokens_per_key)
 
-                            # 更新 latent
-                            # 注意：将 t 转换为 float 以确保与 scheduler 兼容
-                            t_float = t.item() if isinstance(t, torch.Tensor) else float(t)
+                            # 更新 latent (使用 Euler 调度器，更简单可靠)
+                            # Euler 调度器只需要 model_output 和 timestep
                             new_latents: List[torch.Tensor] = []
                             for p, z in zip(pred, latents):
+                                # FlowMatchEulerDiscreteScheduler 的 step 参数
                                 z_next = sample_scheduler.step(
-                                    p.unsqueeze(0),
-                                    t_float,
-                                    z.unsqueeze(0),
+                                    model_output=p.unsqueeze(0),
+                                    timestep=t,
+                                    sample=z.unsqueeze(0),
                                     return_dict=False,
-                                    generator=seed_g,
                                 )[0].squeeze(0)
                                 new_latents.append(z_next)
                             latents = new_latents
