@@ -437,11 +437,13 @@ def main():
     project_root = os.path.dirname(script_dir)  # wan/ 的上级是项目根目录
 
     def resolve_path(path: str) -> str:
-        """将相对路径转换为绝对路径（相对于脚本位置）"""
+        """将相对路径转换为绝对路径（相对于脚本位置），并展开 ~ 为家目录"""
         if not path:
             return path
-        # 如果是绝对路径或包含 ~ 的路径，保持不变（由 os.path.expanduser 处理）
-        if os.path.isabs(path) or path.startswith("~"):
+        # 首先展开 ~ 为家目录
+        path = os.path.expanduser(path)
+        # 如果是绝对路径，直接返回
+        if os.path.isabs(path):
             return path
         # 相对路径：解释为相对于项目根目录
         return os.path.join(project_root, path)
@@ -473,6 +475,13 @@ def main():
 
     # 2) 构建 WanT2V（只用 text_encoder + model；训练时不需要 decode）
     cfg = t2v_1_3B
+    logger.info("开始加载 WanT2V，checkpoint_dir=%s", cfg_run.checkpoint_dir)
+
+    # 检查 checkpoint 目录是否存在
+    if not os.path.exists(os.path.expanduser(cfg_run.checkpoint_dir)):
+        raise FileNotFoundError(f"checkpoint_dir 不存在: {cfg_run.checkpoint_dir}")
+    logger.info("checkpoint_dir 存在，开始初始化 WanT2V（这可能需要几分钟）...")
+
     wrapper = WanT2V(
         config=cfg,
         checkpoint_dir=cfg_run.checkpoint_dir,
@@ -483,6 +492,7 @@ def main():
         use_usp=False,
         t5_cpu=False,
     )
+    logger.info("WanT2V 初始化完成，开始加载模型到设备 %s", device)
     model = wrapper.model
     model.eval().requires_grad_(False)
     model.to(device)
