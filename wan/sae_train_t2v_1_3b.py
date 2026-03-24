@@ -670,11 +670,13 @@ def main():
                             hook_batch = pack_hook_batch(raw, max_tokens_per_key=cfg_run.hook.max_tokens_per_key)
 
                             # 更新 latent
+                            # 注意：将 t 转换为 float 以确保与 scheduler 兼容
+                            t_float = t.item() if isinstance(t, torch.Tensor) else float(t)
                             new_latents: List[torch.Tensor] = []
                             for p, z in zip(pred, latents):
                                 z_next = sample_scheduler.step(
                                     p.unsqueeze(0),
-                                    t,
+                                    t_float,
                                     z.unsqueeze(0),
                                     return_dict=False,
                                     generator=seed_g,
