@@ -150,8 +150,8 @@ training_params = {
     # 学术意义: 不同采样器影响 latent 轨迹分布，进而影响 SAE 学习的特征分布
     # 实际用法: UniPC 更稳定，DPM++ 可能更快收敛
     # 可选值: "unipc" | "dpm++"
-    # 建议值: "unipc"
-    "sample_solver": "unipc",
+    # 建议值: "dpm++"（UniPC 在训练模式下有状态管理问题）
+    "sample_solver": "dpm++",
 
     # shift: 噪声日程 shift 参数
     # 学术意义: 控制扩散过程的时间偏移，影响运动流畅度和生成稳定性
