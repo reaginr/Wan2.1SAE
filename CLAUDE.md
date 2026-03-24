@@ -149,6 +149,167 @@ python wan/sae_test_t2v_1_3b.py \
   --output_path "sae_test_out.pt"
 ```
 
+### SAE Checkpoint 查找与使用指南
+
+#### Checkpoint 文件结构
+
+每个训练实验的 checkpoint 按以下结构组织：
+
+```
+sae_runs/exp1/                              # run_dir: 实验根目录
+├── train_state.json                        # 训练状态（步数、配置等）
+├── block_out.layer15/                      # 特定 hook 层目录
+│   ├── sae_config.json                     # SAE 架构配置
+│   ├── sae_latest.pt                       # 最新权重（软链接/复制）
+│   └── sae_step1000.pt                     # 历史版本
+└── block_out.layer29/
+    └── ...
+```
+
+**重要**: Checkpoint 仅包含 SAE 参数（轻量级，约 100MB），不包含 DiT/T5/VAE 等基础模型权重。
+
+#### 查找已训练的 SAE
+
+**方式 1: 列出实验目录**
+```bash
+# 查看所有实验
+ls sae_runs/
+
+# 查看特定实验的层配置
+ls sae_runs/exp_20250324/
+# 输出: block_out.layer15/  block_out.layer29/  train_state.json
+
+# 查看某层的 checkpoint
+ls sae_runs/exp_20250324/block_out.layer15/
+# 输出: sae_config.json  sae_latest.pt  sae_step500.pt  sae_step1000.pt
+```
+
+**方式 2: 查看训练状态**
+```bash
+# 查看实验配置和当前进度
+cat sae_runs/exp_20250324/train_state.json
+```
+
+**方式 3: 编程方式查找**
+```python
+from wan.sae.sae_run_naming import SAERunLocator, list_available_layers
+
+# 列出某实验的所有可用层
+layers = list_available_layers("sae_runs/exp_20250324")
+print(layers)  # [("block_out", 15), ("block_out", 29)]
+
+# 获取特定层的 checkpoint 路径
+loc = SAERunLocator(run_dir="sae_runs/exp_20250324", hook_mode="block_out", layer_idx=15)
+print(loc.latest_ckpt_path())   # sae_runs/exp_20250324/block_out.layer15/sae_latest.pt
+print(loc.config_path())        # sae_runs/exp_20250324/block_out.layer15/sae_config.json
+```
+
+#### 使用 SAE Checkpoint
+
+**方式 1: 使用测试脚本（推荐）**
+
+编辑 `wan/sae_test_t2v_1_3b.py` 顶部参数：
+```python
+path_params = {
+    "checkpoint_dir": "./Wan2.1-T2V-1.3B",     # DiT 基础模型路径
+    "prompt_dir": "./test_prompts",            # 测试提示词目录
+    "run_dir": "sae_runs/exp_20250324",        # SAE 训练输出目录
+    "output_path": "test_results.pt",
+}
+
+hook_params = {
+    "hook_mode": "block_out",                  # 必须与训练时一致
+    "hook_layers": "15,29",                    # 要测试的层（逗号分隔）
+}
+```
+
+运行测试：
+```bash
+python wan/sae_test_t2v_1_3b.py
+```
+
+**方式 2: 命令行参数覆盖**
+```bash
+# 测试单个层
+python wan/sae_test_t2v_1_3b.py \
+  --run_dir "sae_runs/exp_20250324" \
+  --hook_mode "block_out" \
+  --hook_layers "15" \
+  --prompt_dir "./test_prompts" \
+  --checkpoint_dir "./Wan2.1-T2V-1.3B" \
+  --output_path "layer15_results.pt"
+
+# 测试多个层
+python wan/sae_test_t2v_1_3b.py \
+  --run_dir "sae_runs/exp_20250324" \
+  --hook_layers "15,29" \
+  --batch_prompts 8
+```
+
+**方式 3: 加载 checkpoint 进行自定义分析**
+```python
+import torch
+from wan.sae.sae_run_naming import SAERunLocator, load_json
+from wan.modules.sae_new import SAEConfig, SparseAutoEncoder
+
+# 配置
+run_dir = "sae_runs/exp_20250324"
+hook_mode = "block_out"
+layer_idx = 15
+device = "cuda:0"
+
+# 定位并加载 SAE
+loc = SAERunLocator(run_dir=run_dir, hook_mode=hook_mode, layer_idx=layer_idx)
+
+# 加载配置
+cfg_dict = load_json(loc.config_path())["sae"]
+sae_cfg = SAEConfig(**cfg_dict)
+
+# 加载权重
+sae = SparseAutoEncoder(sae_cfg).to(device)
+ckpt = torch.load(loc.latest_ckpt_path(), map_location=device)
+sae.load_state_dict(ckpt["state_dict"])
+sae.eval()
+
+# 现在可以使用 sae.encode(x) 进行编码分析
+# z, info = sae.encode(hidden_states)  # z: 稀疏表示
+```
+
+#### 在训练时指定保存配置
+
+编辑 `wan/sae_train_t2v_1_3b.py` 配置：
+
+```python
+path_params = {
+    "checkpoint_dir": "./Wan2.1-T2V-1.3B",
+    "prompt_dir": "./nsfw_prompts",
+    "run_dir": "sae_runs/exp_20250324",        # 实验目录名
+}
+
+training_params = {
+    "save_every": 200,                         # 每 200 步保存 checkpoint
+}
+
+hook_params = {
+    "hook_mode": "block_out",                  # hook 模式
+    "hook_layers": "15,29",                    # 同时训练哪些层
+}
+```
+
+#### Checkpoint 内容说明
+
+| 文件 | 大小 | 内容 |
+|------|------|------|
+| `sae_latest.pt` | ~100MB | SAE 权重 (W_enc, W_dec, b_enc, b_dec) + 训练步数 |
+| `sae_step{step}.pt` | ~100MB | 历史版本（可选保留） |
+| `sae_config.json` | ~1KB | SAE 架构参数 (d_model, d_hidden, top_k 等) |
+| `train_state.json` | ~1KB | 全局训练状态 |
+
+**注意**:
+- 恢复训练时使用 `sae_latest.pt`
+- 测试分析时使用 `sae_latest.pt` 或特定的 `sae_step{step}.pt`
+- `sae_config.json` 必须与权重配套使用，用于重建 SAE 架构
+
 ## 架构概述
 
 ### Core Wan2.1 Components

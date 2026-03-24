@@ -61,6 +61,7 @@ screen -ls
 # 四、关闭会话（不想跑了）
 ```bash
 screen -S wan -X quit
+screen -S [PID] -X quit
 ```
 ---
 # ✅ 超级总结（你只需要记 3 条）

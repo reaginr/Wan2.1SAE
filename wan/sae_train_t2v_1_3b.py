@@ -473,6 +473,12 @@ def main():
         raise RuntimeError("没有加载到任何有效 prompt，请检查 prompt_dir 与清洗规则。")
     logger.info("从 %s 加载了 %d 条清洗后的 prompts", cfg_run.prompt_dir, len(prompts))
 
+    # 显存监控
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        init_mem = torch.cuda.memory_allocated() / 1024**3
+        logger.info("初始 GPU 显存占用: %.2f GB", init_mem)
+
     # 2) 构建 WanT2V（只用 text_encoder + model；训练时不需要 decode）
     cfg = t2v_1_3B
     logger.info("开始加载 WanT2V，checkpoint_dir=%s", cfg_run.checkpoint_dir)
@@ -520,19 +526,21 @@ def main():
         else:
             possible_keys.append(f"{hook_mode}.layer{layer}")
 
-    # 初始化或恢复 SAE
+    # 初始化或恢复 SAE（默认存储在 CPU，训练时动态加载到 GPU）
+    # 显存优化策略：多个层同时训练时，避免所有 SAE 同时占用 GPU 显存
     for key in possible_keys:
         mode, layer_str = key.split(".")
         layer_idx = int(layer_str.replace("layer", ""))
         loc = SAERunLocator(run_dir=cfg_run.ckpt.run_dir, hook_mode=mode, layer_idx=layer_idx)
+        # 始终在 CPU 上初始化
+        sae = SparseAutoEncoder(sae_cfg)
         if cfg_run.ckpt.resume and loc.latest_ckpt_path().exists():
             logger.info("从 %s 恢复 SAE: %s", loc.latest_ckpt_path(), key)
-            sae = SparseAutoEncoder(sae_cfg).to(device)
-            ckpt = torch.load(loc.latest_ckpt_path(), map_location=device)
+            ckpt = torch.load(loc.latest_ckpt_path(), map_location="cpu")
             sae.load_state_dict(ckpt["state_dict"])
         else:
-            sae = SparseAutoEncoder(sae_cfg).to(device)
             logger.info("初始化新 SAE: %s", key)
+        # SAE 保留在 CPU，optimizer 也在 CPU
         opt = torch.optim.AdamW(sae.parameters(), lr=training_params["lr"])
         saes[key] = sae
         opts[key] = opt
@@ -657,17 +665,22 @@ def main():
                         else:
                             pred = noise_pred_cond
 
-                        # 训练 SAE
+                        # 训练 SAE（动态加载到 GPU，训练后移回 CPU 以节省显存）
                         hook_batch = pack_hook_batch(raw, max_tokens_per_key=cfg_run.hook.max_tokens_per_key)
                         for key, feats in hook_batch.items():
                             sae = saes[key]
                             opt = opts[key]
+                            # 将 SAE 加载到 GPU 进行训练
+                            sae.to(device)
                             sae.train()
                             feats = feats.to(device)
                             _, _, loss = sae(feats, return_loss=True)
                             opt.zero_grad()
                             loss.backward()
                             opt.step()
+                            # 训练完成后移回 CPU，释放 GPU 显存给下一个 SAE
+                            sae.to("cpu")
+                            del feats, loss
 
                         # 更新 latent
                         new_latents: List[torch.Tensor] = []
@@ -723,17 +736,23 @@ def main():
                 },
             )
 
-            # 打印日志（带 ETA 估计）
+            # 打印日志（带 ETA 估计和显存监控）
             if step % log_params["log_interval"] == 0 or step == 1:
                 avg_step_time = sum(step_times) / len(step_times)
                 remaining_steps = cfg_run.steps - step
                 eta_seconds = avg_step_time * remaining_steps
                 elapsed = step_end - train_start_time
 
+                mem_info = ""
+                if torch.cuda.is_available():
+                    cur_mem = torch.cuda.memory_allocated() / 1024**3
+                    peak_mem = torch.cuda.max_memory_allocated() / 1024**3
+                    mem_info = f" cur_mem={cur_mem:.2f}GB peak_mem={peak_mem:.2f}GB"
+
                 logger.info(
-                    "[%d/%d] batch=%d keys=%s step_time=%.2fs elapsed=%s ETA=%s",
+                    "[%d/%d] batch=%d keys=%s step_time=%.2fs elapsed=%s ETA=%s%s",
                     step, cfg_run.steps, B, list(saes.keys()),
-                    avg_step_time, format_time(elapsed), format_time(eta_seconds)
+                    avg_step_time, format_time(elapsed), format_time(eta_seconds), mem_info
                 )
 
             # 保存 checkpoint
