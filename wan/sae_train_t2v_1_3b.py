@@ -65,13 +65,13 @@ path_params = {
     # 学术意义: 用于激活 DiT 特定神经元的输入文本集合，NSFW 内容有助于激活特定概念神经元
     # 实际用法: 文件夹内包含多个 .txt 文件，每行一个提示词
     # 建议值: 准备至少 1000+ 条多样化提示词以获得更好的激活覆盖
-    "prompt_dir": "~/Wan2.1-main/Wan2.1-main/final_cleaned",
+    "prompt_dir": "../final_cleaned",
 
     # run_dir: SAE 训练输出目录
     # 学术意义: 实验追踪与可复现性，每个实验应有独立的输出目录
     # 实际用法: 会自动在其下创建 {hook_mode}.layer{idx}/ 子目录保存各层 SAE
     # 建议值: "sae_runs/exp_{日期}" 如 "sae_runs/exp_20250319_blockout"
-    "run_dir": "sae_runs/run1",
+    "run_dir": "sae_runs/exp__20250324",
 }
 
 # --------------------------- 模型架构配置 ---------------------------
