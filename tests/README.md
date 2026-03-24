@@ -78,10 +78,13 @@ screen -S [PID] -X quit
 
 你现在直接运行：
 ```bash
-screen -S wan
+screen -L -Logfile run.log -S wan
 ```
 然后跑你的测试脚本，再按 `Ctrl+A D`
 **这样推出会话即可**
 
 vim ~/Wan2.1-main/Wan2.1-main/wan/sae_train_t2v_1_3b.py
 python ~/Wan2.1SAE/wan/sae_train_t2v_1_3b.py
+
+查看 日志 
+cat /root/Wan2.1-main/Wan2.1-main/run.log

@@ -648,55 +648,59 @@ def main():
 
             handles = register_dit_hooks(model, hook_layers=hook_layers, hook_mode=hook_mode, on_tensor=on_tensor)
             try:
-                with torch.no_grad(), amp.autocast(dtype=cfg.param_dtype):
-                    for t in timesteps:
-                        raw.clear()
-                        timestep = torch.stack([t]).repeat(B)  # [B]
+                for t in timesteps:
+                    raw.clear()
+                    timestep = torch.stack([t]).repeat(B)  # [B]
 
-                        # DiT 推理
-                        noise_pred_cond = model(latents, t=timestep, context=context, seq_len=seq_len)
-                        if cfg_run.use_cfg:
-                            noise_pred_uncond = model(latents, t=timestep, context=context_null, seq_len=seq_len)
-                            pred = [
-                                u + cfg_run.guide_scale * (c - u)
-                                for c, u in zip(noise_pred_cond, noise_pred_uncond)
-                            ]
-                            del noise_pred_uncond
-                        else:
-                            pred = noise_pred_cond
+                    # DiT 推理（无梯度）
+                    with torch.no_grad():
+                        with torch.amp.autocast(device_type="cuda", dtype=cfg.param_dtype):
+                            noise_pred_cond = model(latents, t=timestep, context=context, seq_len=seq_len)
+                            if cfg_run.use_cfg:
+                                noise_pred_uncond = model(latents, t=timestep, context=context_null, seq_len=seq_len)
+                                pred = [
+                                    u + cfg_run.guide_scale * (c - u)
+                                    for c, u in zip(noise_pred_cond, noise_pred_uncond)
+                                ]
+                                del noise_pred_uncond
+                            else:
+                                pred = noise_pred_cond
 
-                        # 训练 SAE（动态加载到 GPU，训练后移回 CPU 以节省显存）
-                        hook_batch = pack_hook_batch(raw, max_tokens_per_key=cfg_run.hook.max_tokens_per_key)
-                        for key, feats in hook_batch.items():
-                            sae = saes[key]
-                            opt = opts[key]
-                            # 将 SAE 加载到 GPU 进行训练
-                            sae.to(device)
-                            sae.train()
-                            feats = feats.to(device)
-                            _, _, loss = sae(feats, return_loss=True)
-                            opt.zero_grad()
-                            loss.backward()
-                            opt.step()
-                            # 训练完成后移回 CPU，释放 GPU 显存给下一个 SAE
-                            sae.to("cpu")
-                            del feats, loss
+                            # 收集特征
+                            hook_batch = pack_hook_batch(raw, max_tokens_per_key=cfg_run.hook.max_tokens_per_key)
 
-                        # 更新 latent
-                        new_latents: List[torch.Tensor] = []
-                        for p, z in zip(pred, latents):
-                            z_next = sample_scheduler.step(
-                                p.unsqueeze(0),
-                                t,
-                                z.unsqueeze(0),
-                                return_dict=False,
-                                generator=seed_g,
-                            )[0].squeeze(0)
-                            new_latents.append(z_next)
-                        latents = new_latents
+                            # 更新 latent
+                            new_latents: List[torch.Tensor] = []
+                            for p, z in zip(pred, latents):
+                                z_next = sample_scheduler.step(
+                                    p.unsqueeze(0),
+                                    t,
+                                    z.unsqueeze(0),
+                                    return_dict=False,
+                                    generator=seed_g,
+                                )[0].squeeze(0)
+                                new_latents.append(z_next)
+                            latents = new_latents
 
-                        # 释放张量
-                        del pred, noise_pred_cond, hook_batch
+                            del pred, noise_pred_cond
+
+                    # 训练 SAE（有梯度）- 在 torch.no_grad() 外部
+                    for key, feats in hook_batch.items():
+                        sae = saes[key]
+                        opt = opts[key]
+                        # 将 SAE 加载到 GPU 进行训练
+                        sae.to(device)
+                        sae.train()
+                        feats = feats.to(device)
+                        _, _, loss = sae(feats, return_loss=True)
+                        opt.zero_grad()
+                        loss.backward()
+                        opt.step()
+                        # 训练完成后移回 CPU，释放 GPU 显存给下一个 SAE
+                        sae.to("cpu")
+                        del feats, loss
+
+                    del hook_batch
             finally:
                 remove_hooks(handles)
                 try:
