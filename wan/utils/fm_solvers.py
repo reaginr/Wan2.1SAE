@@ -456,8 +456,13 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `prev_timestep` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
-        sigma_t, sigma_s = self.sigmas[self.step_index + 1], self.sigmas[
-            self.step_index]  # pyright: ignore
+        # 修复：最后一步时，sigma_t 应该使用最后一个 sigma（sigma_last）
+        # 而不是访问 sigmas[step_index + 1] 导致越界
+        if self.step_index >= len(self.sigmas) - 1:
+            sigma_t = self.sigmas[-1]  # 使用最后一个 sigma
+        else:
+            sigma_t = self.sigmas[self.step_index + 1]
+        sigma_s = self.sigmas[self.step_index]  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s, sigma_s = self._sigma_to_alpha_sigma_t(sigma_s)
         lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
@@ -528,8 +533,12 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `prev_timestep` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
-        sigma_t, sigma_s0, sigma_s1 = (
-            self.sigmas[self.step_index + 1],  # pyright: ignore
+        # 修复：确保不会访问越界的 sigma
+        if self.step_index >= len(self.sigmas) - 1:
+            sigma_t = self.sigmas[-1]  # 最后一步使用最后一个 sigma
+        else:
+            sigma_t = self.sigmas[self.step_index + 1]
+        sigma_s0, sigma_s1 = (
             self.sigmas[self.step_index],
             self.sigmas[self.step_index - 1],  # pyright: ignore
         )
@@ -638,8 +647,12 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `prev_timestep` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
-        sigma_t, sigma_s0, sigma_s1, sigma_s2 = (
-            self.sigmas[self.step_index + 1],  # pyright: ignore
+        # 修复：确保不会访问越界的 sigma
+        if self.step_index >= len(self.sigmas) - 1:
+            sigma_t = self.sigmas[-1]  # 最后一步使用最后一个 sigma
+        else:
+            sigma_t = self.sigmas[self.step_index + 1]
+        sigma_s0, sigma_s1, sigma_s2 = (
             self.sigmas[self.step_index],
             self.sigmas[self.step_index - 1],  # pyright: ignore
             self.sigmas[self.step_index - 2],  # pyright: ignore
