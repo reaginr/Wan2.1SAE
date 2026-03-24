@@ -711,12 +711,13 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         self.model_outputs[-1] = model_output_convert
         self.timestep_list[-1] = timestep  # pyright: ignore
 
+        # 修复：确保不会尝试访问超出 timesteps 范围的 order
+        # 当 step_index 接近 timesteps 末尾时，自动降低 order
+        max_possible_order = len(self.timesteps) - self.step_index  # pyright: ignore
         if self.config.lower_order_final:
-            this_order = min(self.config.solver_order,
-                             len(self.timesteps) -
-                             self.step_index)  # pyright: ignore
+            this_order = min(self.config.solver_order, max_possible_order)
         else:
-            this_order = self.config.solver_order
+            this_order = min(self.config.solver_order, max_possible_order)
 
         self.this_order = min(this_order,
                               self.lower_order_nums + 1)  # warmup for multistep

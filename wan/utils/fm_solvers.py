@@ -745,7 +745,9 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             self._init_step_index(timestep)
 
         # Improve numerical stability for small number of steps
-        lower_order_final = (self.step_index == len(self.timesteps) - 1) and (
+        # 修复：最后一步必须使用一阶更新，否则二阶更新会访问 sigmas[step_index + 1] 越界
+        is_final_step = self.step_index == len(self.timesteps) - 1
+        lower_order_final = is_final_step or (
             self.config.euler_at_final or
             (self.config.lower_order_final and len(self.timesteps) < 15) or
             self.config.final_sigmas_type == "zero")
