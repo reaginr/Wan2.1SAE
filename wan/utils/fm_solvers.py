@@ -378,10 +378,13 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `timesteps` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
+
         # DPM-Solver++ needs to solve an integral of the data prediction model.
         if self.config.algorithm_type in ["dpmsolver++", "sde-dpmsolver++"]:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self.sigmas[step_idx]
                 x0_pred = sample - sigma_t * model_output
             else:
                 raise ValueError(
@@ -397,7 +400,7 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         # DPM-Solver needs to solve an integral of the noise prediction model.
         elif self.config.algorithm_type in ["dpmsolver", "sde-dpmsolver"]:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self.sigmas[step_idx]
                 epsilon = sample - (1 - sigma_t) * model_output
             else:
                 raise ValueError(
@@ -406,7 +409,7 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 )
 
             if self.config.thresholding:
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self.sigmas[step_idx]
                 x0_pred = sample - sigma_t * model_output
                 x0_pred = self._threshold_sample(x0_pred)
                 epsilon = model_output + x0_pred
@@ -456,13 +459,14 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `prev_timestep` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
         # 修复：最后一步时，sigma_t 应该使用最后一个 sigma（sigma_last）
-        # 而不是访问 sigmas[step_index + 1] 导致越界
-        if self.step_index >= len(self.sigmas) - 1:
+        if step_idx >= len(self.sigmas) - 1:
             sigma_t = self.sigmas[-1]  # 使用最后一个 sigma
         else:
-            sigma_t = self.sigmas[self.step_index + 1]
-        sigma_s = self.sigmas[self.step_index]  # pyright: ignore
+            sigma_t = self.sigmas[step_idx + 1]
+        sigma_s = self.sigmas[step_idx]  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s, sigma_s = self._sigma_to_alpha_sigma_t(sigma_s)
         lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
@@ -533,15 +537,17 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `prev_timestep` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
         # 修复：确保不会访问越界的 sigma
-        if self.step_index >= len(self.sigmas) - 1:
+        if step_idx >= len(self.sigmas) - 1:
             sigma_t = self.sigmas[-1]  # 最后一步使用最后一个 sigma
         else:
-            sigma_t = self.sigmas[self.step_index + 1]
-        sigma_s0, sigma_s1 = (
-            self.sigmas[self.step_index],
-            self.sigmas[self.step_index - 1],  # pyright: ignore
-        )
+            sigma_t = self.sigmas[step_idx + 1]
+        sigma_s0 = self.sigmas[step_idx]
+        # 修复：确保 step_index - 1 不越界
+        s1_idx = max(0, step_idx - 1)
+        sigma_s1 = self.sigmas[s1_idx]  # pyright: ignore
 
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
@@ -647,16 +653,19 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `prev_timestep` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
         # 修复：确保不会访问越界的 sigma
-        if self.step_index >= len(self.sigmas) - 1:
+        if step_idx >= len(self.sigmas) - 1:
             sigma_t = self.sigmas[-1]  # 最后一步使用最后一个 sigma
         else:
-            sigma_t = self.sigmas[self.step_index + 1]
-        sigma_s0, sigma_s1, sigma_s2 = (
-            self.sigmas[self.step_index],
-            self.sigmas[self.step_index - 1],  # pyright: ignore
-            self.sigmas[self.step_index - 2],  # pyright: ignore
-        )
+            sigma_t = self.sigmas[step_idx + 1]
+        sigma_s0 = self.sigmas[step_idx]
+        # 修复：确保历史索引不越界
+        s1_idx = max(0, step_idx - 1)
+        s2_idx = max(0, step_idx - 2)
+        sigma_s1 = self.sigmas[s1_idx]  # pyright: ignore
+        sigma_s2 = self.sigmas[s2_idx]  # pyright: ignore
 
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)

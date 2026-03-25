@@ -314,12 +314,15 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "Passing `timesteps` is deprecated and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
-        sigma = self.sigmas[self.step_index]
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
+
+        sigma = self.sigmas[step_idx]
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma)
 
         if self.predict_x0:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self.sigmas[step_idx]
                 x0_pred = sample - sigma_t * model_output
             else:
                 raise ValueError(
@@ -333,7 +336,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
             return x0_pred
         else:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self.sigmas[step_idx]
                 epsilon = sample - (1 - sigma_t) * model_output
             else:
                 raise ValueError(
@@ -342,7 +345,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
                 )
 
             if self.config.thresholding:
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self.sigmas[step_idx]
                 x0_pred = sample - sigma_t * model_output
                 x0_pred = self._threshold_sample(x0_pred)
                 epsilon = model_output + x0_pred
@@ -404,12 +407,14 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
             x_t = self.solver_p.step(model_output, s0, x).prev_sample
             return x_t
 
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
         # 修复：确保不会访问越界的 sigma
-        if self.step_index >= len(self.sigmas) - 1:
+        if step_idx >= len(self.sigmas) - 1:
             sigma_t = self.sigmas[-1]
         else:
-            sigma_t = self.sigmas[self.step_index + 1]
-        sigma_s0 = self.sigmas[self.step_index]  # pyright: ignore
+            sigma_t = self.sigmas[step_idx + 1]
+        sigma_s0 = self.sigmas[step_idx]  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
 
@@ -551,8 +556,11 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         x_t = this_sample
         model_t = this_model_output
 
-        sigma_t, sigma_s0 = self.sigmas[self.step_index], self.sigmas[
-            self.step_index - 1]  # pyright: ignore
+        # 修复：确保 step_index 不越界
+        step_idx = min(self.step_index, len(self.sigmas) - 1) if self.step_index is not None else 0
+        # 修复：确保 step_index - 1 不越界
+        s0_idx = max(0, step_idx - 1)
+        sigma_t, sigma_s0 = self.sigmas[step_idx], self.sigmas[s0_idx]  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
 

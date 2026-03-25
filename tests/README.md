@@ -88,3 +88,45 @@ python ~/Wan2.1SAE/wan/sae_train_t2v_1_3b.py
 
 查看 日志 
 cat /root/Wan2.1-main/Wan2.1-main/run.log
+
+
+  ## 完整修复总结
+
+  ### 核心改动
+
+  **1. 完全移除调度器使用** (`wan/sae_train_t2v_1_3b.py`)
+  ```python
+  # 之前：使用 diffusers 调度器（有边界问题）
+  from diffusers import FlowMatchEulerDiscreteScheduler
+  sample_scheduler = FlowMatchEulerDiscreteScheduler(...)
+  sample_scheduler.set_timesteps(...)
+
+  # 现在：手动构造时间步
+  timesteps = torch.linspace(
+      cfg.num_train_timesteps - 1, 0, cfg_run.sampling_steps,
+      device=device, dtype=torch.long
+  )
+
+  2. 手动实现 Euler 更新 (wan/sae_train_t2v_1_3b.py)
+  # 手动 Euler 更新，不依赖任何调度器
+  dt = 1.0 / cfg_run.sampling_steps
+  for p, z in zip(pred, latents):
+      z_next = z - p * dt  # 简单的 Euler 积分
+      new_latents.append(z_next)
+
+  3. 修复 DPM 调度器边界问题 (wan/utils/fm_solvers.py)
+  - 所有访问 sigmas[step_index] 的地方添加边界检查
+  - 使用 step_idx = min(step_index, len(sigmas) - 1)
+
+  4. 修复 UniPC 调度器边界问题 (wan/utils/fm_solvers_unipc.py)
+  - 同样添加边界检查
+
+  ---
+  运行前必须执行
+
+  # 清除 Python 字节码缓存（关键！）
+  find /root/Wan2.1SAE -name "*.pyc" -delete
+  find /root/Wan2.1SAE -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
+
+  # 运行
+  python wan/sae_train_t2v_1_3b.py

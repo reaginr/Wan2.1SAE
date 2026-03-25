@@ -599,14 +599,12 @@ def main():
             ]
 
             # 4.4 构造时间步序列
-            # 使用简单的 Euler 调度器，避免多步调度器的边界问题
-            from diffusers import FlowMatchEulerDiscreteScheduler
-            sample_scheduler = FlowMatchEulerDiscreteScheduler(
-                num_train_timesteps=cfg.num_train_timesteps,
-                shift=cfg_run.shift,
+            # 手动构造时间步，避免使用调度器（防止边界问题）
+            # 使用简单的线性时间步
+            timesteps = torch.linspace(
+                cfg.num_train_timesteps - 1, 0, cfg_run.sampling_steps,
+                device=device, dtype=torch.long
             )
-            sample_scheduler.set_timesteps(cfg_run.sampling_steps, device=device)
-            timesteps = sample_scheduler.timesteps
 
             # CFG 准备
             if cfg_run.negative_prompt == "":
@@ -650,17 +648,15 @@ def main():
                             # 收集特征
                             hook_batch = pack_hook_batch(raw, max_tokens_per_key=cfg_run.hook.max_tokens_per_key)
 
-                            # 更新 latent (使用 Euler 调度器，更简单可靠)
-                            # Euler 调度器只需要 model_output 和 timestep
+                            # 更新 latent
+                            # 注意：调度器 step() 会递增内部计数器，每个 timestep 只能调用一次
+                            # 手动实现 Euler 更新以避免多步调度器的状态管理问题
+                            # Euler 更新公式: x_{t-1} = x_t - v_t * (sigma_t - sigma_{t-1})
+                            dt = 1.0 / cfg_run.sampling_steps  # 简单的均匀步长
                             new_latents: List[torch.Tensor] = []
                             for p, z in zip(pred, latents):
-                                # FlowMatchEulerDiscreteScheduler 的 step 参数
-                                z_next = sample_scheduler.step(
-                                    model_output=p.unsqueeze(0),
-                                    timestep=t,
-                                    sample=z.unsqueeze(0),
-                                    return_dict=False,
-                                )[0].squeeze(0)
+                                # 手动 Euler 更新: z_next = z - pred * dt
+                                z_next = z - p * dt
                                 new_latents.append(z_next)
                             latents = new_latents
 
@@ -685,10 +681,6 @@ def main():
                     del hook_batch
             finally:
                 remove_hooks(handles)
-                try:
-                    del sample_scheduler
-                except Exception:
-                    pass
                 try:
                     del timesteps
                 except Exception:
