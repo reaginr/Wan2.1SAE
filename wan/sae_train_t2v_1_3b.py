@@ -16,6 +16,7 @@ Wan 1.3B 文生视频（T2V）SAE 训练脚本（不做 VAE 解码）。
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import os
@@ -279,6 +280,16 @@ log_params = {
     # 实际用法: 用最近多少步的平均时间来估计剩余时间
     # 建议值: 50（平滑短期波动）
     "eta_window": 50,
+
+    # log_to_file: 是否将日志持久化到文件
+    # 实际用法: 自动保存控制台输出到 run_dir/training.log
+    # 建议值: True（推荐，方便后续查看）
+    "log_to_file": True,
+
+    # loss_log_interval: 详细 loss 记录间隔（步）
+    # 实际用法: 每这么多 step 记录每个 SAE 的 loss 到 JSONL 文件，用于后续可视化
+    # 建议值: 1（每步都记录，精确但文件大）或 10（节省空间）
+    "loss_log_interval": 1,
 }
 
 
@@ -372,10 +383,30 @@ def main():
 
     args = parser.parse_args()
 
+    # 解析 run_dir 用于日志文件路径（在 resolve_path 之前使用原始路径）
+    run_dir_raw = args.run_dir or path_params["run_dir"]
+
     # 设置日志
+    log_handlers = [logging.StreamHandler(sys.stdout)]
+
+    # 添加文件日志处理器
+    if log_params["log_to_file"]:
+        # 确保日志目录存在
+        log_dir = os.path.join(run_dir_raw, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file_path = os.path.join(log_dir, "training.log")
+        file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+        file_handler.setFormatter(file_formatter)
+        log_handlers.append(file_handler)
+        print(f"[INFO] 日志将同时保存到: {log_file_path}")
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        handlers=log_handlers,
+        force=True,  # 允许重新配置（如果之前已设置）
     )
 
     # 导出默认配置
@@ -570,6 +601,18 @@ def main():
     last_log_time = time.time()
     train_start_time = time.time()
 
+    # 初始化 loss 记录（用于后续可视化）
+    loss_history: List[Dict] = []
+    loss_log_path = os.path.join(cfg_run.ckpt.run_dir, "logs", "loss_history.jsonl")
+    loss_csv_path = os.path.join(cfg_run.ckpt.run_dir, "logs", "loss_history.csv")
+    if log_params["log_to_file"]:
+        os.makedirs(os.path.dirname(loss_log_path), exist_ok=True)
+        # 写入 CSV 头
+        if not os.path.exists(loss_csv_path):
+            with open(loss_csv_path, "w", encoding="utf-8") as f:
+                f.write("step,timestamp," + ",".join(saes.keys()) + "\n")
+        logger.info("Loss 历史将保存到: %s", loss_log_path)
+
     try:
         for it in range(start_step, cfg_run.steps):
             step_start = time.time()
@@ -663,6 +706,7 @@ def main():
                             del pred, noise_pred_cond
 
                     # 训练 SAE（有梯度）- 在 torch.no_grad() 外部
+                    step_losses: Dict[str, float] = {}  # 记录每步各 SAE 的 loss
                     for key, feats in hook_batch.items():
                         sae = saes[key]
                         opt = opts[key]
@@ -671,6 +715,8 @@ def main():
                         sae.train()
                         feats = feats.to(device)
                         _, _, loss = sae(feats, return_loss=True)
+                        loss_value = loss.item()  # 保存 loss 值用于记录
+                        step_losses[key] = loss_value
                         opt.zero_grad()
                         loss.backward()
                         opt.step()
@@ -698,6 +744,27 @@ def main():
             step_times.append(step_time)
             if len(step_times) > log_params["eta_window"]:
                 step_times.pop(0)
+
+            # 记录每步各 SAE 的 loss（用于后续可视化）
+            if step_losses and (step % log_params["loss_log_interval"] == 0 or step == 1):
+                loss_record = {
+                    "step": step,
+                    "timestamp": time.time(),
+                    "elapsed": step_end - train_start_time,
+                    "losses": step_losses,
+                }
+                loss_history.append(loss_record)
+
+                # 实时追加到 JSONL 文件
+                if log_params["log_to_file"]:
+                    with open(loss_log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(loss_record, ensure_ascii=False) + "\n")
+                    # 追加到 CSV 文件
+                    with open(loss_csv_path, "a", encoding="utf-8") as f:
+                        row = f"{step},{time.time():.3f}"
+                        for key in saes.keys():
+                            row += f",{step_losses.get(key, 0.0):.6f}"
+                        f.write(row + "\n")
 
             # 保存训练状态
             save_json(
@@ -727,10 +794,13 @@ def main():
                     peak_mem = torch.cuda.max_memory_allocated() / 1024**3
                     mem_info = f" cur_mem={cur_mem:.2f}GB peak_mem={peak_mem:.2f}GB"
 
+                # 构建详细的 loss 字符串
+                loss_str = " ".join([f"{k}={v:.4f}" for k, v in step_losses.items()])
                 logger.info(
-                    "[%d/%d] batch=%d keys=%s step_time=%.2fs elapsed=%s ETA=%s%s",
+                    "[%d/%d] batch=%d keys=%s step_time=%.2fs elapsed=%s ETA=%s%s | %s",
                     step, cfg_run.steps, B, list(saes.keys()),
-                    avg_step_time, format_time(elapsed), format_time(eta_seconds), mem_info
+                    avg_step_time, format_time(elapsed), format_time(eta_seconds), mem_info,
+                    loss_str
                 )
 
             # 保存 checkpoint
