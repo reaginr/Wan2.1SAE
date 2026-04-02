@@ -57,7 +57,7 @@ path_params = {
     # 学术意义: DiT (Diffusion Transformer) 预训练权重，作为 SAE 可解释性分析的基础模型
     # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录（注意：不是 SAE checkpoint 目录）
     # 建议值: "./Wan2.1-T2V-1.3B" 或绝对路径
-    "model_path": "~/Wan/Wan2.1-T2V-1.3B",
+    "model_path": "/root/Wan/Wan2.1-T2V-1.3B",
 
     # prompt_dir: 提示词文件夹路径
     # 学术意义: 用于激活 DiT 特定神经元的输入文本集合，NSFW 内容有助于激活特定概念神经元

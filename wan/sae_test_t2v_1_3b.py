@@ -49,7 +49,7 @@ path_params = {
     # 学术意义: DiT 预训练权重，用于生成激活 SAE 的隐藏状态
     # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录（注意：不是 SAE checkpoint 目录）
     # 建议值: "./Wan2.1-T2V-1.3B"
-    "model_path": "~/Wan/Wan2.1-T2V-1.3B",
+    "model_path": "/root/Wan/Wan2.1-T2V-1.3B",
 
     # prompt_dir: 测试用提示词文件夹路径
     # 学术意义: 用于分析 SAE 在特定概念/风格上的激活模式的输入集合
