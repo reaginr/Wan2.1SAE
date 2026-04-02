@@ -49,25 +49,25 @@ path_params = {
     # 学术意义: DiT 预训练权重，用于生成激活 SAE 的隐藏状态
     # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录（注意：不是 SAE checkpoint 目录）
     # 建议值: "./Wan2.1-T2V-1.3B"
-    "model_path": "",
+    "model_path": "~/Wan/Wan2.1-T2V-1.3B",
 
     # prompt_dir: 测试用提示词文件夹路径
     # 学术意义: 用于分析 SAE 在特定概念/风格上的激活模式的输入集合
     # 实际用法: 与训练时使用相同格式，可不同内容用于验证泛化性
     # 建议值: 准备与训练集分布不同但相关的提示词，评估泛化能力
-    "prompt_dir": "",
+    "prompt_dir": "final_cleaned",
 
     # run_dir: SAE 训练输出目录（训练脚本的 run_dir）
     # 学术意义: 从中加载训练好的 SAE 权重和配置
     # 实际用法: 与 sae_train_t2v_1_3b.py 中指定的 run_dir 相同
     # 建议值: 与训练时一致，如 "sae_runs/exp_20250319_blockout"
-    "run_dir": "",
+    "run_dir": "sae_runs/exp__20250324",
 
     # output_path: 测试结果保存路径
     # 学术意义: 保存 SAE 编码结果的文件，用于后续分析和可视化
     # 实际用法: 保存为 .pt 文件，包含每个 prompt 的 z_mean 和元信息
     # 建议值: 放在 run_dir 下，如 "{run_dir}/test_results.pt"
-    "output_path": "sae_test_out.pt",
+    "output_path": "sae_test_out.json",
 }
 
 # --------------------------- Hook 配置 ---------------------------
@@ -82,7 +82,7 @@ hook_params = {
     # 学术意义: 必须与训练时 hook 的层一致
     # 实际用法: 用逗号分隔的层索引，如 "0,15,29"
     # 建议值: 与训练配置完全一致
-    "hook_layers": "29",
+    "hook_layers": "15",
 }
 
 # --------------------------- 批处理配置 ---------------------------
@@ -97,7 +97,7 @@ batch_params = {
     # 学术意义: 限制测试集大小，用于快速验证或完整分析
     # 实际用法: 从 prompt_dir 中最多加载这么多条
     # 建议值: 500~2000，完整分析用全部数据
-    "max_prompts": 500,
+    "max_prompts": 20,
 }
 
 # --------------------------- 生成尺寸配置 ---------------------------
@@ -149,15 +149,6 @@ log_params = {
     "log_interval": 10,
 }
 
-# --------------------------- 输出配置 ---------------------------
-output_params = {
-    # compute_avg_z_mean: 是否计算整个测试集的平均 z_mean
-    # 学术意义: 获得数据集级别的平均 SAE 激活模式，用于概念分析或对比不同数据集
-    # 实际用法: True 时会在结果中额外保存 avg_z_mean（按 key 分别计算）
-    # 建议值: True（计算开销很小，但提供有价值的汇总信息）
-    "compute_avg_z_mean": True,
-}
-
 # --------------------------- Checkpoint 加载配置 ---------------------------
 checkpoint_params = {
     # sae_checkpoint: SAE checkpoint 加载配置
@@ -168,7 +159,7 @@ checkpoint_params = {
     #   3. 具体文件: "sae_runs/exp1/block_out.layer15/sae_latest.pt"
     #   4. 多层指定（命令行/JSON）: {"block_out.layer15": "sae_runs/exp_A", "block_out.layer29": "sae_runs/exp_B"}
     # 建议值: 留空（从 run_dir 自动加载）或根据需求指定
-    "sae_checkpoint": "",
+    "sae_checkpoint": "sae_runs/exp__20250324",
 
     # layer_sources: 多层源配置（用于从不同实验加载不同层）
     # 学术意义: 支持对比分析不同训练配置下的同一层特征
