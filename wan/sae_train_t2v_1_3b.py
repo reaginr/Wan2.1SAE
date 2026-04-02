@@ -37,6 +37,7 @@ from wan.sae.checkpoint_io import SAECheckpointIO, load_checkpoint, save_checkpo
 from wan.sae.configs import TrainConfig, load_train_config, save_config
 from wan.sae.hooking import HookMode, pack_hook_batch, register_dit_hooks, remove_hooks
 from wan.sae.logger import SAELogManager, get_train_logger
+from wan.sae.path_utils import resolve_path, resolve_dir
 from wan.sae.prompt_io import PromptCleanConfig, batch_iter, load_prompts_from_dir
 from wan.sae.sae_run_naming import SAERunLocator, load_json, save_json, train_state_path
 from wan.text2video import WanT2V
@@ -447,8 +448,10 @@ def main():
 
     args = parser.parse_args()
 
-    # 解析 run_dir 用于日志文件路径（在 resolve_path 之前使用原始路径）
-    run_dir_raw = args.run_dir or path_params["run_dir"]
+    # 解析 run_dir 用于日志文件路径（使用统一路径解析）
+    from wan.sae.path_utils import get_project_root
+    project_root = get_project_root()
+    run_dir_resolved = str(resolve_dir(args.run_dir or path_params["run_dir"], base_dir=project_root, create=True))
 
     # 设置日志
     log_handlers = [logging.StreamHandler(sys.stdout)]
@@ -456,7 +459,7 @@ def main():
     # 添加文件日志处理器
     if log_params["log_to_file"]:
         # 确保日志目录存在
-        log_dir = os.path.join(run_dir_raw, "logs")
+        log_dir = os.path.join(run_dir_resolved, "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_file_path = os.path.join(log_dir, "training.log")
         file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
@@ -552,26 +555,14 @@ def main():
             "reset_step_count": reset_step_count,
         }
 
-    # 自动将相对路径转换为相对于脚本位置的绝对路径
-    # 这样无论从哪里运行脚本，路径都能正确解析
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)  # wan/ 的上级是项目根目录
+    # 使用统一的路径解析工具处理所有路径
+    # 支持：~ 展开、环境变量、相对路径（相对于项目根目录）
+    from wan.sae.path_utils import get_project_root
+    project_root = get_project_root()
 
-    def resolve_path(path: str) -> str:
-        """将相对路径转换为绝对路径（相对于脚本位置），并展开 ~ 为家目录"""
-        if not path:
-            return path
-        # 首先展开 ~ 为家目录
-        path = os.path.expanduser(path)
-        # 如果是绝对路径，直接返回
-        if os.path.isabs(path):
-            return path
-        # 相对路径：解释为相对于项目根目录
-        return os.path.join(project_root, path)
-
-    cfg_run.checkpoint_dir = resolve_path(cfg_run.checkpoint_dir)  # 内部仍使用 checkpoint_dir 名称
-    cfg_run.prompt_dir = resolve_path(cfg_run.prompt_dir)
-    cfg_run.ckpt.run_dir = resolve_path(cfg_run.ckpt.run_dir)
+    cfg_run.checkpoint_dir = str(resolve_path(cfg_run.checkpoint_dir, base_dir=project_root))
+    cfg_run.prompt_dir = str(resolve_path(cfg_run.prompt_dir, base_dir=project_root))
+    cfg_run.ckpt.run_dir = str(resolve_path(cfg_run.ckpt.run_dir, base_dir=project_root))
 
     # 从恢复配置中提取参数（用于后续逻辑）
     resume_cfg = getattr(cfg_run, 'resume_config', {

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional
 
+from wan.sae.path_utils import resolve_path
+
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 _WHITESPACE = re.compile(r"\s+")
@@ -52,9 +54,9 @@ def clean_prompt_line(line: str, cfg: PromptCleanConfig) -> Optional[str]:
 
 
 def iter_prompt_files(prompt_dir: str) -> Iterator[Path]:
-    p = Path(prompt_dir)
+    p = resolve_path(prompt_dir)
     if not p.exists():
-        raise FileNotFoundError(f"prompt_dir not found: {prompt_dir}")
+        raise FileNotFoundError(f"prompt_dir not found: {p}")
     for f in sorted(p.rglob("*.txt")):
         if f.is_file():
             yield f

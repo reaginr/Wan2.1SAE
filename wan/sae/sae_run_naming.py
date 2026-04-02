@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from wan.sae.path_utils import resolve_path, resolve_dir
+
 
 @dataclass(frozen=True)
 class SAERunLocator:
@@ -16,7 +18,7 @@ class SAERunLocator:
         return f"{self.hook_mode}.layer{self.layer_idx}"
 
     def artifact_dir(self) -> Path:
-        return Path(self.run_dir) / self.key()
+        return resolve_path(self.run_dir) / self.key()
 
     def config_path(self) -> Path:
         return self.artifact_dir() / "sae_config.json"
@@ -41,5 +43,5 @@ def train_state_path(run_dir: str) -> Path:
     """
     全局训练状态（step、参数快照等）保存位置。
     """
-    return Path(run_dir) / "train_state.json"
+    return resolve_path(run_dir) / "train_state.json"
 

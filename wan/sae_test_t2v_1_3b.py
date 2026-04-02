@@ -30,6 +30,7 @@ from wan.modules.sae_new import SAEConfig, SparseAutoEncoder
 from wan.sae.checkpoint_io import SAECheckpointIO, load_checkpoint
 from wan.sae.hooking import HookMode, register_dit_hooks, remove_hooks
 from wan.sae.logger import SAELogManager, get_test_logger
+from wan.sae.path_utils import resolve_path, resolve_dir
 from wan.sae.prompt_io import PromptCleanConfig, batch_iter, load_prompts_from_dir
 from wan.sae.sae_run_naming import SAERunLocator, load_json
 from wan.text2video import WanT2V
@@ -346,6 +347,18 @@ def main():
     if not args.run_dir:
         raise ValueError("run_dir 不能为空（SAE 训练输出目录）")
 
+    # 解析所有路径（支持 ~ 展开、环境变量、相对路径）
+    model_path = str(resolve_path(model_path))
+    prompt_dir = str(resolve_path(args.prompt_dir))
+    run_dir = str(resolve_path(args.run_dir))
+    output_path = str(resolve_path(args.output_path))
+
+    logger.info("解析后的路径:")
+    logger.info("  model_path: %s", model_path)
+    logger.info("  prompt_dir: %s", prompt_dir)
+    logger.info("  run_dir: %s", run_dir)
+    logger.info("  output_path: %s", output_path)
+
     # 设置随机种子和设备
     torch.manual_seed(args.seed)
     device = torch.device(f"cuda:{args.device_id}" if torch.cuda.is_available() else "cpu")
@@ -353,7 +366,7 @@ def main():
 
     # 加载并清洗提示词
     clean_cfg = PromptCleanConfig(min_len=args.min_len, max_len=args.max_len)
-    prompts = load_prompts_from_dir(args.prompt_dir, clean_cfg=clean_cfg, limit=args.max_prompts)
+    prompts = load_prompts_from_dir(prompt_dir, clean_cfg=clean_cfg, limit=args.max_prompts)
     if not prompts:
         raise RuntimeError("没有加载到任何有效 prompt。")
     logger.info("加载了 %d 条提示词", len(prompts))
@@ -431,7 +444,7 @@ def main():
                 source_run_dir = os.path.dirname(os.path.dirname(sae_checkpoint))
             logger.info("  %s 从 sae_checkpoint 加载: %s", key, source_run_dir)
         else:
-            source_run_dir = args.run_dir
+            source_run_dir = run_dir
 
         try:
             sae = load_sae_for_key(
@@ -461,7 +474,7 @@ def main():
     for key in saes.keys():
         mode, layer_str = key.split(".")
         layer_idx = int(layer_str.replace("layer", ""))
-        log_managers[key] = get_test_logger(args.run_dir, hook_mode=mode, layer_idx=layer_idx)
+        log_managers[key] = get_test_logger(run_dir, hook_mode=mode, layer_idx=layer_idx)
         log_managers[key].log_event("test_start", f"开始测试 {key}", {"num_prompts": len(prompts)})
 
     # 测试结果收集
@@ -576,9 +589,12 @@ def main():
                        batch_count, total_batches, len(results))
 
     # 保存汇总结果（torch格式，便于后续加载）
-    out = Path(args.output_path)
+    out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"results": results}, out)
+    save_dict = {"results": results}
+    if avg_z_mean_by_key:
+        save_dict["avg_z_mean_by_key"] = avg_z_mean_by_key
+    torch.save(save_dict, out)
     logger.info("测试结果已保存到: %s", out)
     logger.info("共 %d 条记录", len(results))
 

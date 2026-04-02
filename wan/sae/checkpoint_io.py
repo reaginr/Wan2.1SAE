@@ -77,7 +77,7 @@ class SAECheckpointIO:
         """
         self.sae = sae
         self.step = step
-        self.sae_config = sae.cfg
+        self.sae_config = sae.config
         self.hook_mode = hook_mode
         self.layer_idx = layer_idx
         self.extra_info = extra_info or {}
@@ -263,7 +263,7 @@ class SAECheckpointIO:
             f"    d_model: {self.sae_config.d_model}",
             f"    d_hidden: {self.sae_config.d_hidden}",
             f"    sparsity: {self.sae_config.sparsity}",
-            f"    top_k: {self.sae_config.top_k}",
+            f"    top_k: {getattr(self.sae_config, 'top_k', 'N/A')}",
             f"  Timestamp: {self.timestamp}",
         ]
         return "\n".join(lines)

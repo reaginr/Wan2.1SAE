@@ -83,6 +83,14 @@ screen -L -Logfile run.log -S wan
 然后跑你的测试脚本，再按 `Ctrl+A D`
 **这样推出会话即可**
 
+进入 screen 后，想翻历史日志：
+先按：Ctrl + A → 然后松开，再按 [
+你会进入 screen 的 copy 模式
+然后就可以用：
+↑ ↓ 上下键 翻行
+PgUp / PgDn 翻页
+想退出翻页模式，按 ESC
+
 vim ~/Wan2.1-main/Wan2.1-main/wan/sae_train_t2v_1_3b.py
 python ~/Wan2.1SAE/wan/sae_train_t2v_1_3b.py
 
