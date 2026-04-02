@@ -12,7 +12,7 @@ bash ./test.sh /home/hhb/Wan2.1-T2V-1.3B
 
 英博云
 ```
-cd ~/Wan2.1-main/Wan2.1-main
+cd ~/Wan2.1SAE
 bash ~/Wan2.1-main/Wan2.1-main/tests/test.sh ~/Wan 1
 python ~/Wan2.1-main/Wan2.1-main/generate.py \
 --task t2v-1.3B \
@@ -130,3 +130,6 @@ cat /root/Wan2.1-main/Wan2.1-main/run.log
 
   # 运行
   python wan/sae_train_t2v_1_3b.py
+
+  强制进入旧有会话
+  screen -D -r wan

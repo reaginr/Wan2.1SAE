@@ -15,8 +15,10 @@ Wan 1.3B 文生视频（T2V）SAE 测试脚本：
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,7 +27,9 @@ import torch.cuda.amp as amp
 
 from wan.configs.wan_t2v_1_3B import t2v_1_3B
 from wan.modules.sae_new import SAEConfig, SparseAutoEncoder
+from wan.sae.checkpoint_io import SAECheckpointIO, load_checkpoint
 from wan.sae.hooking import HookMode, register_dit_hooks, remove_hooks
+from wan.sae.logger import SAELogManager, get_test_logger
 from wan.sae.prompt_io import PromptCleanConfig, batch_iter, load_prompts_from_dir
 from wan.sae.sae_run_naming import SAERunLocator, load_json
 from wan.text2video import WanT2V
@@ -41,11 +45,11 @@ logger = logging.getLogger(__name__)
 
 # --------------------------- 路径配置 ---------------------------
 path_params = {
-    # checkpoint_dir: Wan 1.3B 模型权重目录路径
+    # model_path: Wan 2.1 DiT 模型权重目录路径
     # 学术意义: DiT 预训练权重，用于生成激活 SAE 的隐藏状态
-    # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录
+    # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录（注意：不是 SAE checkpoint 目录）
     # 建议值: "./Wan2.1-T2V-1.3B"
-    "checkpoint_dir": "",
+    "model_path": "",
 
     # prompt_dir: 测试用提示词文件夹路径
     # 学术意义: 用于分析 SAE 在特定概念/风格上的激活模式的输入集合
@@ -145,6 +149,46 @@ log_params = {
     "log_interval": 10,
 }
 
+# --------------------------- 输出配置 ---------------------------
+output_params = {
+    # compute_avg_z_mean: 是否计算整个测试集的平均 z_mean
+    # 学术意义: 获得数据集级别的平均 SAE 激活模式，用于概念分析或对比不同数据集
+    # 实际用法: True 时会在结果中额外保存 avg_z_mean（按 key 分别计算）
+    # 建议值: True（计算开销很小，但提供有价值的汇总信息）
+    "compute_avg_z_mean": True,
+}
+
+# --------------------------- Checkpoint 加载配置 ---------------------------
+checkpoint_params = {
+    # sae_checkpoint: SAE checkpoint 加载配置
+    # 学术意义: 支持灵活的 checkpoint 来源，包括跨实验加载和多层独立源
+    # 支持格式:
+    #   1. 空字符串 "": 从 run_dir 加载所有层（默认行为）
+    #   2. 单一路径: "sae_runs/exp1"（加载该目录下所有层）
+    #   3. 具体文件: "sae_runs/exp1/block_out.layer15/sae_latest.pt"
+    #   4. 多层指定（命令行/JSON）: {"block_out.layer15": "sae_runs/exp_A", "block_out.layer29": "sae_runs/exp_B"}
+    # 建议值: 留空（从 run_dir 自动加载）或根据需求指定
+    "sae_checkpoint": "",
+
+    # layer_sources: 多层源配置（用于从不同实验加载不同层）
+    # 学术意义: 支持对比分析不同训练配置下的同一层特征
+    # 实际用法: 字典格式，key 为 "hook_mode.layer_idx"，value 为 run_dir 路径
+    # 示例: {"block_out.layer15": "sae_runs/exp_base", "block_out.layer29": "sae_runs/exp_finetune"}
+    # 建议值: {}（统一源）或按需指定
+    "layer_sources": {},
+
+    # allow_partial_load: 是否允许加载不匹配的层配置
+    # 学术意义: 当测试层与训练层不完全一致时的容错处理
+    # 实际用法: 设置为 True 时，允许部分层加载失败而不中断整个测试
+    # 建议值: False（严格匹配）或 True（容错模式）
+    "allow_partial_load": False,
+
+    # strict_loading: 是否严格匹配权重形状
+    # 实际用法: 当 SAE 架构有微小差异时使用非严格加载
+    # 建议值: True（默认）或 False（兼容模式）
+    "strict_loading": True,
+}
+
 
 ##########################################################################################
 # 核心代码区域 - 一般无需修改
@@ -174,7 +218,14 @@ def parse_layers(s: str) -> List[int]:
     return [int(p) for p in parts]
 
 
-def load_sae_for_key(run_dir: str, hook_mode: str, layer_idx: int, device) -> SparseAutoEncoder:
+def load_sae_for_key(
+    run_dir: str,
+    hook_mode: str,
+    layer_idx: int,
+    device,
+    allow_partial: bool = False,
+    strict: bool = True,
+) -> SparseAutoEncoder:
     """
     加载指定 hook_mode 和 layer_idx 的 SAE。
 
@@ -183,20 +234,41 @@ def load_sae_for_key(run_dir: str, hook_mode: str, layer_idx: int, device) -> Sp
         hook_mode: hook 模式（如 "block_out"）
         layer_idx: 层索引
         device: 目标设备
+        allow_partial: 是否允许部分加载（文件不存在时返回 None 而不是报错）
+        strict: 是否严格匹配权重形状
 
     返回:
-        加载并设为 eval 模式的 SparseAutoEncoder
+        加载并设为 eval 模式的 SparseAutoEncoder，如果 allow_partial=True 且文件不存在则返回 None
     """
     loc = SAERunLocator(run_dir=run_dir, hook_mode=hook_mode, layer_idx=layer_idx)
-    cfg = load_json(loc.config_path()).get("sae")
-    if not cfg:
-        raise FileNotFoundError(f"缺少 {loc.key()} 的 sae_config.json: {loc.config_path()}")
-    sae_cfg = SAEConfig(**cfg)
-    sae = SparseAutoEncoder(sae_cfg).to(device)
-    ckpt = torch.load(loc.latest_ckpt_path(), map_location=device)
-    sae.load_state_dict(ckpt["state_dict"])
-    sae.eval()
-    return sae
+
+    # 检查 checkpoint 是否存在
+    if not loc.latest_ckpt_path().exists():
+        if allow_partial:
+            logger.warning("缺少 %s 的 checkpoint: %s", loc.key(), loc.latest_ckpt_path())
+            return None
+        raise FileNotFoundError(f"缺少 {loc.key()} 的 checkpoint: {loc.latest_ckpt_path()}")
+
+    try:
+        # 使用新的统一 IO 接口加载（自动兼容新旧格式）
+        io = SAECheckpointIO.load(
+            loc,
+            device=device,
+            strict=strict,
+            allow_legacy=True,  # 允许从旧格式回退
+        )
+
+        # 记录配置来源
+        if io._config_source == "json_fallback":
+            logger.debug("%s 从旧格式 .json 加载配置 [建议迁移]", loc.key())
+
+        return io.sae
+
+    except Exception as e:
+        if allow_partial:
+            logger.warning("加载 %s 失败: %s", loc.key(), str(e))
+            return None
+        raise RuntimeError(f"加载 SAE {loc.key()} 失败: {e}") from e
 
 
 def _print_config():
@@ -212,6 +284,7 @@ def _print_config():
         ("提示词清洗", prompt_clean_params),
         ("系统配置", system_params),
         ("日志配置", log_params),
+        ("Checkpoint 加载", checkpoint_params),
     ]:
         logger.info(f"\n【{name}】")
         for k, v in params.items():
@@ -222,7 +295,10 @@ def _print_config():
 def main():
     # 参数解析（允许命令行覆盖默认配置）
     parser = argparse.ArgumentParser(description="Test SAE with Wan 1.3B T2V DiT hooks (single-step forward).")
-    parser.add_argument("--checkpoint_dir", type=str, default=path_params["checkpoint_dir"])
+    parser.add_argument("--model_path", type=str, default=path_params["model_path"],
+                        help="Wan 2.1 DiT 模型权重目录路径（旧名称 --checkpoint_dir 仍兼容但已弃用）")
+    parser.add_argument("--checkpoint_dir", type=str, default="",
+                        help="[已弃用] 请使用 --model_path")
     parser.add_argument("--prompt_dir", type=str, default=path_params["prompt_dir"])
     parser.add_argument("--run_dir", type=str, default=path_params["run_dir"])
     parser.add_argument("--output_path", type=str, default=path_params["output_path"])
@@ -239,6 +315,20 @@ def main():
     parser.add_argument("--min_len", type=int, default=prompt_clean_params["min_len"])
     parser.add_argument("--max_len", type=int, default=prompt_clean_params["max_len"])
 
+    # Checkpoint 加载参数（基于 checkpoint_params）
+    parser.add_argument("--sae_checkpoint", type=str, default=checkpoint_params["sae_checkpoint"],
+                        help="SAE checkpoint 路径或目录（覆盖 run_dir）")
+    parser.add_argument("--allow_partial_load", action="store_true",
+                        default=checkpoint_params["allow_partial_load"],
+                        help="允许部分层加载失败")
+    parser.add_argument("--strict_loading", action="store_true",
+                        default=checkpoint_params["strict_loading"],
+                        help="严格匹配权重形状")
+
+    # 多层源配置（允许从不同 run_dir 加载不同层）
+    parser.add_argument("--layer_sources", type=str, default="",
+                        help="层源配置，格式: 'layer15:run1,layer29:run2' 或 JSON 文件路径")
+
     args = parser.parse_args()
 
     # 设置日志
@@ -247,12 +337,19 @@ def main():
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     )
 
+    # 处理已弃用的 --checkpoint_dir 参数
+    model_path = args.model_path
+    if args.checkpoint_dir:
+        logger.warning("--checkpoint_dir 已弃用，请使用 --model_path。当前仍兼容处理。")
+        if not model_path:
+            model_path = args.checkpoint_dir
+
     # 打印配置
     _print_config()
 
     # 验证必要参数
-    if not args.checkpoint_dir:
-        raise ValueError("checkpoint_dir 不能为空")
+    if not model_path:
+        raise ValueError("model_path 不能为空，请通过 --model_path 指定 Wan 2.1 模型路径")
     if not args.prompt_dir:
         raise ValueError("prompt_dir 不能为空")
     if not args.run_dir:
@@ -274,7 +371,7 @@ def main():
     cfg = t2v_1_3B
     wrapper = WanT2V(
         config=cfg,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=model_path,
         device_id=args.device_id,
         rank=0,
         t5_fsdp=False,
@@ -296,6 +393,26 @@ def main():
     hook_layers = parse_layers(args.hook_layers)
     hook_mode: HookMode = args.hook_mode  # type: ignore
 
+    # 解析多层源配置（命令行覆盖配置文件）
+    layer_sources: Dict[str, str] = checkpoint_params["layer_sources"].copy()
+    if args.layer_sources:
+        if args.layer_sources.endswith('.json'):
+            # 从 JSON 文件加载
+            import json
+            with open(args.layer_sources, 'r') as f:
+                layer_sources = json.load(f)
+        else:
+            # 解析命令行格式: "layer15:run1,layer29:run2"
+            for part in args.layer_sources.split(','):
+                if ':' in part:
+                    layer_part, run_part = part.split(':', 1)
+                    layer_key = f"{hook_mode}.layer{layer_part.strip()}"
+                    layer_sources[layer_key] = run_part.strip()
+
+    # 处理 sae_checkpoint 参数（覆盖默认 run_dir）
+    sae_checkpoint = args.sae_checkpoint if args.sae_checkpoint else checkpoint_params["sae_checkpoint"]
+    allow_partial_load = args.allow_partial_load or checkpoint_params["allow_partial_load"]
+
     # 加载所有需要的 SAE
     saes: Dict[str, SparseAutoEncoder] = {}
     keys: List[str] = []
@@ -309,8 +426,52 @@ def main():
     for key in keys:
         mode, layer_str = key.split(".")
         layer_idx = int(layer_str.replace("layer", ""))
-        saes[key] = load_sae_for_key(args.run_dir, hook_mode=mode, layer_idx=layer_idx, device=device)
-        logger.info("  已加载: %s", key)
+
+        # 确定源目录（优先级: layer_sources > sae_checkpoint > run_dir）
+        if key in layer_sources:
+            source_run_dir = layer_sources[key]
+            logger.info("  %s 从自定义源加载: %s", key, source_run_dir)
+        elif sae_checkpoint:
+            # sae_checkpoint 可以是目录或具体文件
+            if os.path.isdir(sae_checkpoint):
+                source_run_dir = sae_checkpoint
+            else:
+                # 如果是具体文件路径，取其所在目录
+                source_run_dir = os.path.dirname(os.path.dirname(sae_checkpoint))
+            logger.info("  %s 从 sae_checkpoint 加载: %s", key, source_run_dir)
+        else:
+            source_run_dir = args.run_dir
+
+        try:
+            sae = load_sae_for_key(
+                source_run_dir,
+                hook_mode=mode,
+                layer_idx=layer_idx,
+                device=device,
+                allow_partial=allow_partial_load,
+                strict=args.strict_loading,
+            )
+            if sae is not None:
+                saes[key] = sae
+                logger.info("  已加载: %s", key)
+            elif not allow_partial_load:
+                raise RuntimeError(f"无法加载 SAE: {key}")
+        except Exception as e:
+            if allow_partial_load:
+                logger.warning("  加载 %s 失败（已跳过）: %s", key, str(e))
+            else:
+                raise RuntimeError(f"加载 SAE {key} 失败: {e}") from e
+
+    if not saes:
+        raise RuntimeError("没有成功加载任何 SAE，请检查 checkpoint 路径和配置")
+
+    # 初始化统一日志管理器（每个层一个logger）
+    log_managers: Dict[str, SAELogManager] = {}
+    for key in saes.keys():
+        mode, layer_str = key.split(".")
+        layer_idx = int(layer_str.replace("layer", ""))
+        log_managers[key] = get_test_logger(args.run_dir, hook_mode=mode, layer_idx=layer_idx)
+        log_managers[key].log_event("test_start", f"开始测试 {key}", {"num_prompts": len(prompts)})
 
     # 测试结果收集
     results: List[Dict[str, Any]] = []
@@ -343,7 +504,7 @@ def main():
         finally:
             remove_hooks(handles)
 
-        # 对每个 key 计算 SAE 编码
+        # 对每个 key 计算 SAE 编码和 loss
         for key, act in raw.items():
             sae = saes.get(key)
             if sae is None:
@@ -351,38 +512,123 @@ def main():
             # act: [B, L, C] -> [B*L, C]
             b, l, c = act.shape
             x_flat = act.reshape(b * l, c).to(device)
+
             with torch.no_grad():
+                # SAE编码
                 z, topk_idx, topk_val = sae.encode(x_flat)  # z: [B*L, d_hidden]
+
+                # 解码计算重构误差（loss）
+                x_recon = sae.decode(z)
+                loss = ((x_recon - x_flat) ** 2).mean().item()  # MSE loss
+                recon_mse_per_token = ((x_recon - x_flat) ** 2).mean(dim=-1).cpu()  # [B*L]
+
+                # 计算稀疏度
+                sparsity = (z.abs() > 1e-6).float().mean().item()
+                num_activations = (z.abs() > 1e-6).sum(dim=-1).float().mean().item()
+
             z = z.view(b, l, -1)  # [B, L, d_hidden]
             z_mean = z.mean(dim=1).cpu()  # [B, d_hidden]
+            z_std = z.std(dim=1).cpu()  # [B, d_hidden]
+
+            # 计算每个prompt的平均loss（按token平均）
+            recon_mse_per_prompt = recon_mse_per_token.view(b, l).mean(dim=1)  # [B]
 
             mode, layer_str = key.split(".")
             layer_idx = int(layer_str.replace("layer", ""))
 
             for i in range(B):
+                result_id = f"batch{batch_count}_idx{i}_{key}"
                 item: Dict[str, Any] = {
                     "prompt": batch[i],
                     "hook_type": mode,
                     "layer_idx": layer_idx,
+                    "batch_idx": batch_count - 1,
+                    "prompt_idx": (batch_count - 1) * args.batch_prompts + i,
                     "z_mean": z_mean[i],  # Tensor[d_hidden]
+                    "z_std": z_std[i],  # Tensor[d_hidden]
+                    "loss": loss,  # 全局平均loss
+                    "recon_mse": recon_mse_per_prompt[i].item(),  # 该prompt的平均重构误差
+                    "sparsity": sparsity,  # 稀疏度
+                    "num_activations": num_activations,  # 平均激活数
                 }
-                # 若是 topk SAE，额外保存前若干 token 的 topk idx/val
+
+                # 若是 topk SAE，额外保存 topk 信息
                 if topk_idx is not None and topk_val is not None:
-                    item["topk_idx_token0"] = topk_idx.view(b, l, -1)[i, 0].cpu()
-                    item["topk_val_token0"] = topk_val.view(b, l, -1)[i, 0].cpu()
+                    topk_idx_view = topk_idx.view(b, l, -1)
+                    topk_val_view = topk_val.view(b, l, -1)
+                    item["topk_idx_token0"] = topk_idx_view[i, 0].cpu()
+                    item["topk_val_token0"] = topk_val_view[i, 0].cpu()
+                    item["topk_idx_all_tokens"] = topk_idx_view[i].cpu()  # [L, top_k]
+                    item["topk_val_all_tokens"] = topk_val_view[i].cpu()  # [L, top_k]
+
                 results.append(item)
+
+                # 使用统一日志管理器记录详细结果
+                log_record = {
+                    "prompt": batch[i],
+                    "loss": item["loss"],
+                    "recon_mse": item["recon_mse"],
+                    "sparsity": item["sparsity"],
+                    "num_activations": item["num_activations"],
+                    "z_mean": z_mean[i].tolist(),
+                    "z_std": z_std[i].tolist(),
+                }
+                if "topk_idx_token0" in item:
+                    log_record["topk_idx_token0"] = item["topk_idx_token0"].tolist()
+                    log_record["topk_val_token0"] = item["topk_val_token0"].tolist()
+
+                log_managers[key].log_result(log_record, result_id=result_id)
 
         # 打印进度
         if batch_count % log_params["log_interval"] == 0 or batch_count == total_batches:
             logger.info("处理进度: [%d/%d] batches, 已收集 %d 条结果",
                        batch_count, total_batches, len(results))
 
-    # 保存结果
+    # 保存汇总结果（torch格式，便于后续加载）
     out = Path(args.output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"results": results}, out)
     logger.info("测试结果已保存到: %s", out)
     logger.info("共 %d 条记录", len(results))
+
+    # 保存JSON格式结果（便于查看和分析）
+    json_out = out.with_suffix(".json")
+    json_results = []
+    for r in results:
+        json_item = {
+            "prompt": r["prompt"],
+            "hook_type": r["hook_type"],
+            "layer_idx": r["layer_idx"],
+            "loss": r["loss"],
+            "recon_mse": r["recon_mse"],
+            "sparsity": r["sparsity"],
+            "num_activations": r["num_activations"],
+            "z_mean": r["z_mean"].tolist() if hasattr(r["z_mean"], "tolist") else r["z_mean"],
+        }
+        if "topk_idx_token0" in r:
+            json_item["topk_idx_token0"] = r["topk_idx_token0"].tolist() if hasattr(r["topk_idx_token0"], "tolist") else r["topk_idx_token0"]
+            json_item["topk_val_token0"] = r["topk_val_token0"].tolist() if hasattr(r["topk_val_token0"], "tolist") else r["topk_val_token0"]
+        json_results.append(json_item)
+
+    with open(json_out, "w", encoding="utf-8") as f:
+        json.dump(json_results, f, ensure_ascii=False, indent=2)
+    logger.info("JSON格式结果已保存到: %s", json_out)
+
+    # 记录测试完成事件
+    for key, log_mgr in log_managers.items():
+        log_mgr.log_event("test_complete", f"测试完成 {key}", {"total_results": len(results)})
+        # 保存summary
+        key_results = [r for r in results if f"{r['hook_type']}.layer{r['layer_idx']}" == key]
+        if key_results:
+            avg_loss = sum(r["loss"] for r in key_results) / len(key_results)
+            avg_sparsity = sum(r["sparsity"] for r in key_results) / len(key_results)
+            log_mgr.save_summary({
+                "total_prompts": len(key_results),
+                "avg_loss": avg_loss,
+                "avg_recon_mse": sum(r["recon_mse"] for r in key_results) / len(key_results),
+                "avg_sparsity": avg_sparsity,
+                "avg_num_activations": sum(r["num_activations"] for r in key_results) / len(key_results),
+            })
 
     # ------------------------- 批量可视化伪代码（后续迭代） -------------------------
     logger.info("\n可视化建议:")

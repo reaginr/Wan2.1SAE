@@ -33,8 +33,10 @@ import torch.cuda.amp as amp
 
 from wan.configs.wan_t2v_1_3B import t2v_1_3B
 from wan.modules.sae_new import SAEConfig, SparseAutoEncoder
+from wan.sae.checkpoint_io import SAECheckpointIO, load_checkpoint, save_checkpoint
 from wan.sae.configs import TrainConfig, load_train_config, save_config
 from wan.sae.hooking import HookMode, pack_hook_batch, register_dit_hooks, remove_hooks
+from wan.sae.logger import SAELogManager, get_train_logger
 from wan.sae.prompt_io import PromptCleanConfig, batch_iter, load_prompts_from_dir
 from wan.sae.sae_run_naming import SAERunLocator, load_json, save_json, train_state_path
 from wan.text2video import WanT2V
@@ -51,11 +53,11 @@ logger = logging.getLogger(__name__)
 
 # --------------------------- 路径配置 ---------------------------
 path_params = {
-    # checkpoint_dir: Wan 1.3B 模型权重目录路径
+    # model_path: Wan 2.1 DiT 模型权重目录路径
     # 学术意义: DiT (Diffusion Transformer) 预训练权重，作为 SAE 可解释性分析的基础模型
-    # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录
+    # 实际用法: 指向包含 Wan2.1-T2V-1.3B 权重的目录（注意：不是 SAE checkpoint 目录）
     # 建议值: "./Wan2.1-T2V-1.3B" 或绝对路径
-    "checkpoint_dir": "~/Wan/Wan2.1-T2V-1.3B",
+    "model_path": "~/Wan/Wan2.1-T2V-1.3B",
 
     # prompt_dir: 提示词文件夹路径
     # 学术意义: 用于激活 DiT 特定神经元的输入文本集合，NSFW 内容有助于激活特定概念神经元
@@ -248,12 +250,6 @@ system_params = {
     # 实际用法: 影响 torch、numpy、random 的随机状态
     # 建议值: 固定值如 42 或 0，对比实验时保持一致
     "seed": 0,
-
-    # resume: 是否从检查点恢复
-    # 学术意义: 支持长实验中断后继续，不丢失训练进度
-    # 实际用法: 从 run_dir/train_state.json 读取状态，加载 sae_latest.pt
-    # 建议值: False（新实验）或 True（恢复）
-    "resume": False,
 }
 
 # --------------------------- 提示词清洗配置 ---------------------------
@@ -290,6 +286,49 @@ log_params = {
     # 实际用法: 每这么多 step 记录每个 SAE 的 loss 到 JSONL 文件，用于后续可视化
     # 建议值: 1（每步都记录，精确但文件大）或 10（节省空间）
     "loss_log_interval": 1,
+}
+
+# --------------------------- 恢复训练配置 ---------------------------
+resume_params = {
+    # enabled: 是否启用恢复训练模式
+    # 学术意义: 支持长实验中断后继续，不丢失训练进度；也支持迁移学习和增量训练
+    # 实际用法: 当设置为 True 时，将尝试从 sae_checkpoint 路径或 run_dir 加载已有权重
+    # 建议值: False（新实验）或 True（恢复/迁移学习）
+    "enabled": False,
+
+    # sae_checkpoint: 指定要恢复的 SAE checkpoint 路径
+    # 学术意义: 明确指定权重来源，支持跨实验加载和迁移学习
+    # 可选值:
+    #   - 空字符串 "": 从 run_dir 下自动查找最新的 checkpoint
+    #   - 具体路径: 如 "sae_runs/exp1/block_out.layer15/sae_latest.pt"
+    #   - 目录路径: 如 "sae_runs/exp1"（自动加载该目录下所有层的 checkpoint）
+    # 建议值: 留空（自动检测）或指定具体实验目录
+    "sae_checkpoint": "",
+
+    # additional_layers: 在恢复基础上新增的层
+    # 学术意义: 支持增量训练，在已训练层基础上添加新层进行联合训练
+    # 实际用法: 如果之前训练了层 15，现在想同时训练层 15 和 29，设置为 [29]
+    # 格式: 层索引列表，如 [20, 25]
+    # 建议值: []（无新增）或指定要新增的层索引
+    "additional_layers": [],
+
+    # frozen_layers: 要冻结的层（不参与训练）
+    # 学术意义: 固定已训练好的层，只训练新增层，防止已学习特征被破坏
+    # 实际用法: 格式为 ["block_out.layer15", "block_out.layer20"]
+    # 建议值: []（全部训练）或冻结已有层只训练新增层
+    "frozen_layers": [],
+
+    # reset_optimizer: 是否重置优化器状态
+    # 学术意义: 当改变学习率、冻结部分层或进行迁移学习时，重置优化器有助于稳定训练
+    # 实际用法: 设置为 True 会丢弃已保存的优化器状态，使用新的优化器
+    # 建议值: False（保持状态）或 True（改变训练配置时）
+    "reset_optimizer": False,
+
+    # reset_step_count: 是否重置步数计数器
+    # 学术意义: 设置为 True 表示从 step=0 开始计数（但加载已有权重）
+    # 实际用法: 用于迁移学习场景，新任务从新步数开始，但保留预训练权重
+    # 建议值: False（继续计数）或 True（新任务/迁移学习）
+    "reset_step_count": False,
 }
 
 
@@ -358,11 +397,18 @@ def _print_config():
         ("系统配置", system_params),
         ("提示词清洗", prompt_clean_params),
         ("日志配置", log_params),
+        ("恢复训练", resume_params),
     ]:
         logger.info(f"\n【{name}】")
         for k, v in params.items():
             logger.info(f"  {k}: {v}")
     logger.info("=" * 60)
+
+
+def parse_layers(s: str) -> List[int]:
+    """解析层索引字符串，如 "0,5,10,29" -> [0, 5, 10, 29]。"""
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    return [int(p) for p in parts]
 
 
 def main():
@@ -372,14 +418,32 @@ def main():
     parser.add_argument("--dump_default_config", type=str, default="", help="导出默认配置到 JSON 文件并退出")
 
     # 允许命令行覆盖关键参数
-    parser.add_argument("--checkpoint_dir", type=str, default=path_params["checkpoint_dir"])
+    parser.add_argument("--model_path", type=str, default=path_params["model_path"],
+                        help="Wan 2.1 DiT 模型权重目录路径（旧名称 --checkpoint_dir 仍兼容但已弃用）")
+    parser.add_argument("--checkpoint_dir", type=str, default="",
+                        help="[已弃用] 请使用 --model_path")
     parser.add_argument("--prompt_dir", type=str, default=path_params["prompt_dir"])
     parser.add_argument("--run_dir", type=str, default=path_params["run_dir"])
     parser.add_argument("--steps", type=int, default=training_params["steps"])
     parser.add_argument("--batch_prompts", type=int, default=training_params["batch_prompts"])
     parser.add_argument("--hook_layers", type=str, default=hook_params["hook_layers"])
-    parser.add_argument("--resume", action="store_true", default=system_params["resume"])
     parser.add_argument("--device_id", type=int, default=system_params["device_id"])
+
+    # 恢复训练参数（基于 resume_params）
+    parser.add_argument("--resume", action="store_true", default=resume_params["enabled"],
+                        help="启用恢复训练模式（相当于 --resume_enabled）")
+    parser.add_argument("--resume_enabled", action="store_true", default=resume_params["enabled"],
+                        help="是否启用恢复训练模式")
+    parser.add_argument("--sae_checkpoint", type=str, default=resume_params["sae_checkpoint"],
+                        help="指定要恢复的 SAE checkpoint 路径，空字符串表示自动检测")
+    parser.add_argument("--additional_layers", type=str, default="",
+                        help="新增层，如'20,25'（覆盖配置文件）")
+    parser.add_argument("--frozen_layers", type=str, default="",
+                        help="冻结层，如'block_out.layer15,block_out.layer20'（覆盖配置文件）")
+    parser.add_argument("--reset_optimizer", action="store_true",
+                        help="重置优化器状态（覆盖配置文件）")
+    parser.add_argument("--reset_step_count", action="store_true",
+                        help="重置步数计数器（覆盖配置文件）")
 
     args = parser.parse_args()
 
@@ -421,9 +485,32 @@ def main():
         cfg_run = load_train_config(args.config)
         logger.info("已从 %s 加载配置", args.config)
     else:
+        # 处理已弃用的 --checkpoint_dir 参数
+        model_path = args.model_path
+        if args.checkpoint_dir:
+            logger.warning("--checkpoint_dir 已弃用，请使用 --model_path。当前仍兼容处理。")
+            if not model_path:
+                model_path = args.checkpoint_dir
+
+        # 处理恢复参数（命令行覆盖配置文件）
+        resume_enabled = args.resume or args.resume_enabled or resume_params["enabled"]
+        sae_checkpoint = args.sae_checkpoint if args.sae_checkpoint else resume_params["sae_checkpoint"]
+        reset_optimizer = args.reset_optimizer or resume_params["reset_optimizer"]
+        reset_step_count = args.reset_step_count or resume_params["reset_step_count"]
+
+        # 解析 additional_layers（命令行覆盖）
+        additional_layers = resume_params["additional_layers"][:]
+        if args.additional_layers:
+            additional_layers = parse_layers(args.additional_layers)
+
+        # 解析 frozen_layers（命令行覆盖）
+        frozen_layers = resume_params["frozen_layers"][:]
+        if args.frozen_layers:
+            frozen_layers = [x.strip() for x in args.frozen_layers.split(",") if x.strip()]
+
         # 使用代码中的默认参数构建配置
         cfg_run = TrainConfig(
-            checkpoint_dir=args.checkpoint_dir or path_params["checkpoint_dir"],
+            checkpoint_dir=model_path or path_params["model_path"],
             prompt_dir=args.prompt_dir or path_params["prompt_dir"],
             device_id=args.device_id,
             seed=system_params["seed"],
@@ -440,7 +527,7 @@ def main():
         # 填充嵌套配置
         cfg_run.ckpt.run_dir = args.run_dir or path_params["run_dir"]
         cfg_run.ckpt.save_every = training_params["save_every"]
-        cfg_run.ckpt.resume = args.resume
+        cfg_run.ckpt.resume = resume_enabled
         cfg_run.memory.offload_text_encoder = memory_params["offload_text_encoder"]
         cfg_run.memory.empty_cache_every = memory_params["empty_cache_every"]
         cfg_run.hook.hook_mode = hook_params["hook_mode"]
@@ -454,6 +541,16 @@ def main():
             min_len=prompt_clean_params["min_len"],
             max_len=prompt_clean_params["max_len"],
         )
+
+        # 保存恢复参数到配置对象供后续使用
+        cfg_run.resume_config = {
+            "enabled": resume_enabled,
+            "sae_checkpoint": sae_checkpoint,
+            "additional_layers": additional_layers,
+            "frozen_layers": frozen_layers,
+            "reset_optimizer": reset_optimizer,
+            "reset_step_count": reset_step_count,
+        }
 
     # 自动将相对路径转换为相对于脚本位置的绝对路径
     # 这样无论从哪里运行脚本，路径都能正确解析
@@ -472,9 +569,19 @@ def main():
         # 相对路径：解释为相对于项目根目录
         return os.path.join(project_root, path)
 
-    cfg_run.checkpoint_dir = resolve_path(cfg_run.checkpoint_dir)
+    cfg_run.checkpoint_dir = resolve_path(cfg_run.checkpoint_dir)  # 内部仍使用 checkpoint_dir 名称
     cfg_run.prompt_dir = resolve_path(cfg_run.prompt_dir)
     cfg_run.ckpt.run_dir = resolve_path(cfg_run.ckpt.run_dir)
+
+    # 从恢复配置中提取参数（用于后续逻辑）
+    resume_cfg = getattr(cfg_run, 'resume_config', {
+        "enabled": resume_params["enabled"],
+        "sae_checkpoint": resume_params["sae_checkpoint"],
+        "additional_layers": resume_params["additional_layers"],
+        "frozen_layers": resume_params["frozen_layers"],
+        "reset_optimizer": resume_params["reset_optimizer"],
+        "reset_step_count": resume_params["reset_step_count"],
+    })
 
     # 打印配置
     _print_config()
@@ -486,7 +593,7 @@ def main():
 
     # 验证必要参数
     if not cfg_run.checkpoint_dir:
-        raise ValueError("checkpoint_dir 不能为空，请通过 --checkpoint_dir 或修改 path_params 指定")
+        raise ValueError("model_path 不能为空，请通过 --model_path 或修改 path_params['model_path'] 指定")
     if not cfg_run.prompt_dir:
         raise ValueError("prompt_dir 不能为空，请通过 --prompt_dir 或修改 path_params 指定")
 
@@ -550,33 +657,135 @@ def main():
         else:
             possible_keys.append(f"{hook_mode}.layer{layer}")
 
-    # 初始化或恢复 SAE（默认存储在 CPU，训练时动态加载到 GPU）
-    # 显存优化策略：多个层同时训练时，避免所有 SAE 同时占用 GPU 显存
+    # 处理增强恢复参数（优先使用 resume_cfg，支持命令行覆盖）
+    resume_from = resume_cfg["sae_checkpoint"] if resume_cfg["enabled"] else ""
+    additional_layers = resume_cfg["additional_layers"]
+    frozen_layers = resume_cfg["frozen_layers"]
+    reset_optimizer = resume_cfg["reset_optimizer"]
+    reset_step_count = resume_cfg["reset_step_count"]
+
+    # 构建层加载信息
+    layer_load_info: Dict[str, Dict[str, Any]] = {}
     for key in possible_keys:
         mode, layer_str = key.split(".")
         layer_idx = int(layer_str.replace("layer", ""))
-        loc = SAERunLocator(run_dir=cfg_run.ckpt.run_dir, hook_mode=mode, layer_idx=layer_idx)
-        # 始终在 CPU 上初始化
-        sae = SparseAutoEncoder(sae_cfg)
-        if cfg_run.ckpt.resume and loc.latest_ckpt_path().exists():
-            logger.info("从 %s 恢复 SAE: %s", loc.latest_ckpt_path(), key)
-            ckpt = torch.load(loc.latest_ckpt_path(), map_location="cpu")
-            sae.load_state_dict(ckpt["state_dict"])
-        else:
-            logger.info("初始化新 SAE: %s", key)
-        # SAE 保留在 CPU，optimizer 也在 CPU
-        opt = torch.optim.AdamW(sae.parameters(), lr=training_params["lr"])
-        saes[key] = sae
-        opts[key] = opt
 
-        # 保存配置
+        # 确定源目录
+        source_run_dir = resume_from
+
+        # 检查是否是新增层
+        is_new_layer = layer_idx in additional_layers
+
+        # 检查是否冻结
+        is_frozen = key in frozen_layers
+
+        layer_load_info[key] = {
+            "source_run_dir": source_run_dir,
+            "is_new_layer": is_new_layer,
+            "is_frozen": is_frozen,
+            "layer_idx": layer_idx,
+            "mode": mode,
+        }
+
+    # 初始化或恢复 SAE（默认存储在 CPU，训练时动态加载到 GPU）
+    # 显存优化策略：多个层同时训练时，避免所有 SAE 同时占用 GPU 显存
+    for key in possible_keys:
+        info = layer_load_info[key]
+        mode = info["mode"]
+        layer_idx = info["layer_idx"]
+        is_new_layer = info["is_new_layer"]
+        is_frozen = info["is_frozen"]
+
+        # 目标位置（新实验目录）
+        loc_target = SAERunLocator(run_dir=cfg_run.ckpt.run_dir, hook_mode=mode, layer_idx=layer_idx)
+
+        # 源位置（恢复目录）
+        source_run_dir = info["source_run_dir"]
+        if source_run_dir and source_run_dir != cfg_run.ckpt.run_dir:
+            loc_source = SAERunLocator(run_dir=source_run_dir, hook_mode=mode, layer_idx=layer_idx)
+        else:
+            loc_source = loc_target
+
+        # 判断是否需要从 checkpoint 恢复
+        should_load_ckpt = (not is_new_layer or loc_source.latest_ckpt_path().exists())
+
+        # 使用新的统一 IO 接口加载 checkpoint（自动兼容新旧格式）
+        sae_cfg_to_use = sae_cfg  # 默认使用代码配置
+        sae = None
+        ckpt_loaded = False
+
+        if should_load_ckpt and loc_source.latest_ckpt_path().exists():
+            try:
+                # 使用 SAECheckpointIO 加载（自动处理新/旧格式）
+                io = SAECheckpointIO.load(
+                    loc_source,
+                    device="cpu",
+                    strict=True,
+                    allow_legacy=True,  # 允许从旧格式（.json）回退加载
+                )
+                sae = io.sae
+                sae_cfg_to_use = io.sae_config
+                ckpt_loaded = True
+
+                # 记录配置来源
+                if io._config_source == "checkpoint":
+                    logger.info("从 checkpoint 内置配置恢复 SAE: %s (d_hidden=%d, top_k=%d)",
+                               key, sae_cfg_to_use.d_hidden, sae_cfg_to_use.top_k)
+                elif io._config_source == "json_fallback":
+                    logger.info("从旧格式 .json 恢复 SAE: %s (d_hidden=%d, top_k=%d) [建议迁移]",
+                               key, sae_cfg_to_use.d_hidden, sae_cfg_to_use.top_k)
+                else:
+                    logger.info("从 checkpoint 恢复 SAE: %s", key)
+
+                # 如果配置与代码不同，提示用户
+                if sae_cfg_to_use.to_dict() != sae_cfg.to_dict():
+                    logger.info("  注意: checkpoint 配置与代码配置不同，使用 checkpoint 配置")
+
+            except Exception as e:
+                if is_new_layer:
+                    # 新增层加载失败，使用代码配置初始化
+                    logger.warning("加载 checkpoint 失败，使用代码配置初始化新层 %s: %s", key, str(e))
+                    sae_cfg_to_use = sae_cfg
+                else:
+                    # 恢复层加载失败，报错
+                    raise RuntimeError(f"无法恢复 SAE {key}: {e}") from e
+
+        # 如果未加载成功，使用代码配置初始化
+        if sae is None:
+            logger.info("初始化新 SAE: %s", key)
+            sae = SparseAutoEncoder(sae_cfg_to_use)
+
+        # 冻结处理
+        if is_frozen:
+            logger.info("冻结层: %s（不参与训练）", key)
+            for param in sae.parameters():
+                param.requires_grad = False
+
+        # SAE 保留在 CPU
+        saes[key] = sae
+
+        # 优化器（冻结层不创建优化器）
+        if not is_frozen:
+            opt = torch.optim.AdamW(sae.parameters(), lr=training_params["lr"])
+            opts[key] = opt
+        else:
+            opts[key] = None  # type: ignore
+
+        # 保存配置到目标目录
         save_json(
-            loc.config_path(),
+            loc_target.config_path(),
             {
-                "sae": sae_cfg.to_dict(),
+                "sae": sae_cfg_to_use.to_dict(),
                 "hook": {"hook_mode": mode, "layer_idx": layer_idx},
             },
         )
+
+    # 统计信息
+    num_total = len(possible_keys)
+    num_new = sum(1 for k in possible_keys if layer_load_info[k]["is_new_layer"])
+    num_frozen = sum(1 for k in possible_keys if layer_load_info[k]["is_frozen"])
+    logger.info("SAE 初始化完成: 总共=%d, 新增=%d, 冻结=%d, 可训练=%d",
+                num_total, num_new, num_frozen, num_total - num_frozen - num_new)
 
     # 4) 训练循环
     prompt_batches = list(batch_iter(prompts, batch_size=cfg_run.batch_prompts, shuffle=True, seed=cfg_run.seed))
@@ -586,13 +795,30 @@ def main():
 
     # 读取/初始化训练状态
     state_path = train_state_path(cfg_run.ckpt.run_dir)
-    if cfg_run.ckpt.resume and state_path.exists():
+
+    # 确定是否恢复训练状态
+    should_resume_state = cfg_run.ckpt.resume and state_path.exists() and not reset_step_count
+
+    # 如果有指定 sae_checkpoint 但不同目录，尝试从源目录恢复状态
+    if resume_from and resume_from != cfg_run.ckpt.run_dir and os.path.exists(resume_from):
+        source_state_path = train_state_path(resume_from)
+        if source_state_path.exists() and not reset_step_count:
+            state = load_json(source_state_path)
+            start_step = int(state.get("step", 0))
+            logger.info("从源目录 %s 恢复训练状态，step=%d", resume_from, start_step)
+        else:
+            start_step = 0
+            logger.info("无法从源目录恢复状态，从头开始训练 (step=0)")
+    elif should_resume_state:
         state = load_json(state_path)
         start_step = int(state.get("step", 0))
         logger.info("从 step=%d 恢复训练 (总步数=%d)", start_step, cfg_run.steps)
     else:
         start_step = 0
-        logger.info("从头开始训练 (step=0)")
+        if reset_step_count:
+            logger.info("重置步数计数器，从头开始训练 (step=0)")
+        else:
+            logger.info("从头开始训练 (step=0)")
 
     step = start_step
 
@@ -607,11 +833,11 @@ def main():
     loss_csv_path = os.path.join(cfg_run.ckpt.run_dir, "logs", "loss_history.csv")
     if log_params["log_to_file"]:
         os.makedirs(os.path.dirname(loss_log_path), exist_ok=True)
-        # 写入 CSV 头
+        # 写入 CSV 头（扁平化格式，每行一个 SAE 的指标）
         if not os.path.exists(loss_csv_path):
             with open(loss_csv_path, "w", encoding="utf-8") as f:
-                f.write("step,timestamp," + ",".join(saes.keys()) + "\n")
-        logger.info("Loss 历史将保存到: %s", loss_log_path)
+                f.write("step,timestamp,sae_key,loss,recon_mse,l2_norm,sparsity,num_activations\n")
+        logger.info("Loss 历史将保存到: %s 和 %s", loss_log_path, loss_csv_path)
 
     try:
         for it in range(start_step, cfg_run.steps):
@@ -706,7 +932,7 @@ def main():
                             del pred, noise_pred_cond
 
                     # 训练 SAE（有梯度）- 在 torch.no_grad() 外部
-                    step_losses: Dict[str, float] = {}  # 记录每步各 SAE 的 loss
+                    step_metrics: Dict[str, Dict] = {}  # 记录每步各 SAE 的详细指标
                     for key, feats in hook_batch.items():
                         sae = saes[key]
                         opt = opts[key]
@@ -714,15 +940,36 @@ def main():
                         sae.to(device)
                         sae.train()
                         feats = feats.to(device)
-                        _, _, loss = sae(feats, return_loss=True)
-                        loss_value = loss.item()  # 保存 loss 值用于记录
-                        step_losses[key] = loss_value
-                        opt.zero_grad()
-                        loss.backward()
-                        opt.step()
+                        z, x_recon, loss = sae(feats, return_loss=True)
+
+                        # 计算详细指标用于可视化
+                        with torch.no_grad():
+                            # Reconstruction MSE
+                            recon_mse = ((x_recon - feats) ** 2).mean().item()
+                            # L2 范数（权重衰减效果）
+                            l2_norm = sum(p.pow(2).sum().item() for p in sae.parameters())
+                            # 稀疏度（非零激活比例）
+                            sparsity = (z.abs() > 1e-6).float().mean().item()
+                            # 激活数量（TopK 实际值）
+                            num_activations = (z.abs() > 1e-6).sum().item() / z.shape[0]
+
+                        step_metrics[key] = {
+                            "loss": loss.item(),
+                            "recon_mse": recon_mse,
+                            "l2_norm": l2_norm,
+                            "sparsity": sparsity,
+                            "num_activations": num_activations,
+                        }
+
+                        # 只更新非冻结层
+                        opt = opts[key]
+                        if opt is not None:
+                            opt.zero_grad()
+                            loss.backward()
+                            opt.step()
                         # 训练完成后移回 CPU，释放 GPU 显存给下一个 SAE
                         sae.to("cpu")
-                        del feats, loss
+                        del feats, loss, z, x_recon
 
                     del hook_batch
             finally:
@@ -745,13 +992,14 @@ def main():
             if len(step_times) > log_params["eta_window"]:
                 step_times.pop(0)
 
-            # 记录每步各 SAE 的 loss（用于后续可视化）
-            if step_losses and (step % log_params["loss_log_interval"] == 0 or step == 1):
+            # 记录每步各 SAE 的详细指标（用于后续可视化）
+            if step_metrics and (step % log_params["loss_log_interval"] == 0 or step == 1):
                 loss_record = {
                     "step": step,
                     "timestamp": time.time(),
                     "elapsed": step_end - train_start_time,
-                    "losses": step_losses,
+                    "step_time": step_time,
+                    "metrics": step_metrics,
                 }
                 loss_history.append(loss_record)
 
@@ -759,12 +1007,12 @@ def main():
                 if log_params["log_to_file"]:
                     with open(loss_log_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(loss_record, ensure_ascii=False) + "\n")
-                    # 追加到 CSV 文件
+
+                    # 追加到 CSV 文件（扁平化格式，方便 pandas 读取）
                     with open(loss_csv_path, "a", encoding="utf-8") as f:
-                        row = f"{step},{time.time():.3f}"
-                        for key in saes.keys():
-                            row += f",{step_losses.get(key, 0.0):.6f}"
-                        f.write(row + "\n")
+                        for key, metrics in step_metrics.items():
+                            row = f"{step},{time.time():.3f},{key},{metrics['loss']:.6f},{metrics['recon_mse']:.6f},{metrics['l2_norm']:.4f},{metrics['sparsity']:.6f},{metrics['num_activations']:.2f}\n"
+                            f.write(row)
 
             # 保存训练状态
             save_json(
@@ -794,26 +1042,42 @@ def main():
                     peak_mem = torch.cuda.max_memory_allocated() / 1024**3
                     mem_info = f" cur_mem={cur_mem:.2f}GB peak_mem={peak_mem:.2f}GB"
 
-                # 构建详细的 loss 字符串
-                loss_str = " ".join([f"{k}={v:.4f}" for k, v in step_losses.items()])
-                logger.info(
-                    "[%d/%d] batch=%d keys=%s step_time=%.2fs elapsed=%s ETA=%s%s | %s",
-                    step, cfg_run.steps, B, list(saes.keys()),
-                    avg_step_time, format_time(elapsed), format_time(eta_seconds), mem_info,
-                    loss_str
-                )
+                # 构建详细的指标字符串
+                metrics_strs = []
+                for key, metrics in step_metrics.items():
+                    m = metrics
+                    metrics_strs.append(
+                        f"{key}: loss={m['loss']:.4f} mse={m['recon_mse']:.4f} "
+                        f"spar={m['sparsity']:.3f} acts={m['num_activations']:.1f}"
+                    )
+                metrics_line = " | ".join(metrics_strs)
 
-            # 保存 checkpoint
+                logger.info(
+                    "[%d/%d] batch=%d step_time=%.2fs elapsed=%s ETA=%s%s",
+                    step, cfg_run.steps, B,
+                    avg_step_time, format_time(elapsed), format_time(eta_seconds), mem_info
+                )
+                logger.info("  %s", metrics_line)
+
+            # 保存 checkpoint（使用新格式，配置内置）
             if step % cfg_run.ckpt.save_every == 0 or step == cfg_run.steps:
                 logger.info("保存 checkpoint 于 step=%d", step)
                 for key, sae in saes.items():
                     mode, layer_str = key.split(".")
                     layer_idx = int(layer_str.replace("layer", ""))
                     loc = SAERunLocator(run_dir=cfg_run.ckpt.run_dir, hook_mode=mode, layer_idx=layer_idx)
-                    ckpt_dir = loc.artifact_dir()
-                    ckpt_dir.mkdir(parents=True, exist_ok=True)
-                    torch.save({"state_dict": sae.state_dict(), "step": step}, loc.ckpt_path(step))
-                    torch.save({"state_dict": sae.state_dict(), "step": step}, loc.latest_ckpt_path())
+                    # 使用新的统一 IO 接口保存（配置自动内置到 .pt）
+                    io = SAECheckpointIO(
+                        sae=sae,
+                        step=step,
+                        hook_mode=mode,
+                        layer_idx=layer_idx,
+                        extra_info={
+                            "run_dir": cfg_run.ckpt.run_dir,
+                            "timestamp": time.time(),
+                        },
+                    )
+                    io.save(loc, save_legacy_json=True)  # 同时保留 .json 便于查看
 
             # 显存清理
             if cfg_run.memory.empty_cache_every and (step % cfg_run.memory.empty_cache_every == 0) and torch.cuda.is_available():
@@ -838,7 +1102,15 @@ def main():
             mode, layer_str = key.split(".")
             layer_idx = int(layer_str.replace("layer", ""))
             loc = SAERunLocator(run_dir=cfg_run.ckpt.run_dir, hook_mode=mode, layer_idx=layer_idx)
-            torch.save({"state_dict": sae.state_dict(), "step": step}, loc.latest_ckpt_path())
+            # 使用新的统一 IO 接口保存
+            io = SAECheckpointIO(
+                sae=sae,
+                step=step,
+                hook_mode=mode,
+                layer_idx=layer_idx,
+                extra_info={"interrupted": True},
+            )
+            io.save(loc, save_legacy_json=True)
         logger.info("状态和 SAE 权重已保存，可用 --resume 恢复训练。")
 
     except Exception as e:
@@ -861,7 +1133,15 @@ def main():
             mode, layer_str = key.split(".")
             layer_idx = int(layer_str.replace("layer", ""))
             loc = SAERunLocator(run_dir=cfg_run.ckpt.run_dir, hook_mode=mode, layer_idx=layer_idx)
-            torch.save({"state_dict": sae.state_dict(), "step": step}, loc.latest_ckpt_path())
+            # 使用新的统一 IO 接口保存
+            io = SAECheckpointIO(
+                sae=sae,
+                step=step,
+                hook_mode=mode,
+                layer_idx=layer_idx,
+                extra_info={"error": str(e)},
+            )
+            io.save(loc, save_legacy_json=True)
         raise
 
     total_time = time.time() - train_start_time
