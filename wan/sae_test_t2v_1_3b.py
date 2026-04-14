@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -487,13 +488,31 @@ def main():
         B = len(batch)
         batch_count += 1
 
-        # 文本编码
-        wrapper.text_encoder.model.to(device)
-        context = wrapper.text_encoder(batch, device)
+        logger.info("处理批次 [%d/%d], 大小=%d", batch_count, total_batches, B)
+
+        try:
+            # 文本编码
+            logger.debug("  文本编码...")
+            wrapper.text_encoder.model.to(device)
+            context = wrapper.text_encoder(batch, device)
+            logger.debug("  文本编码完成, context.shape=%s", context.shape if hasattr(context, 'shape') else 'N/A')
+        except Exception as e:
+            logger.error("批次 [%d/%d] 文本编码失败: %s", batch_count, total_batches, e)
+            raise RuntimeError(f"批次 {batch_count} 文本编码失败: {e}") from e
 
         # 随机时间步和噪声 latent（单步前向）
         t = torch.randint(low=0, high=cfg.num_train_timesteps, size=(B,), device=device, dtype=torch.long)
         x_list = [torch.randn(*latent_shape, device=device, dtype=torch.float32) for _ in range(B)]
+
+        # 随机时间步和噪声 latent（单步前向）
+        try:
+            logger.debug("  准备噪声 latent...")
+            t = torch.randint(low=0, high=cfg.num_train_timesteps, size=(B,), device=device, dtype=torch.long)
+            x_list = [torch.randn(*latent_shape, device=device, dtype=torch.float32) for _ in range(B)]
+            logger.debug("  噪声 latent 准备完成, len=%d, shape=%s", len(x_list), latent_shape)
+        except Exception as e:
+            logger.error("批次 [%d/%d] 准备噪声 latent 失败: %s", batch_count, total_batches, e)
+            raise RuntimeError(f"批次 {batch_count} 准备噪声 latent 失败: {e}") from e
 
         # Hook 收集激活
         raw: Dict[str, torch.Tensor] = {}
@@ -501,48 +520,63 @@ def main():
         def on_tensor(k: str, v: torch.Tensor):
             raw[k] = v  # [B, L, C]
 
+        logger.debug("  注册 hooks...")
         handles = register_dit_hooks(model, hook_layers=hook_layers, hook_mode=hook_mode, on_tensor=on_tensor)
+        logger.debug("  Hooks 注册完成: %d 个 handles", len(handles))
+
         try:
+            logger.debug("  开始 DiT forward...")
             with torch.no_grad(), amp.autocast(dtype=cfg.param_dtype):
                 _ = model(x_list, t=t, context=context, seq_len=seq_len)
+            logger.debug("  DiT forward 完成, 收集到 %d 个激活", len(raw))
+        except Exception as e:
+            logger.error("批次 [%d/%d] DiT forward 失败: %s", batch_count, total_batches, e)
+            raise RuntimeError(f"批次 {batch_count} DiT forward 失败: {e}") from e
         finally:
             remove_hooks(handles)
+            logger.debug("  Hooks 已移除")
 
         # 对每个 key 计算 SAE 编码和 loss
+        logger.debug("  处理 %d 个 key 的 SAE 编码...", len(raw))
         for key, act in raw.items():
             sae = saes.get(key)
             if sae is None:
+                logger.warning("  Key %s 没有对应的 SAE，跳过", key)
                 continue
-            # act: [B, L, C] -> [B*L, C]
-            b, l, c = act.shape
-            x_flat = act.reshape(b * l, c).to(device)
 
-            with torch.no_grad():
-                # SAE编码
-                z, topk_idx, topk_val = sae.encode(x_flat)  # z: [B*L, d_hidden]
+            try:
+                # act: [B, L, C] -> [B*L, C]
+                b, l, c = act.shape
+                logger.debug("    %s: act.shape=%s", key, act.shape)
+                x_flat = act.reshape(b * l, c).to(device)
 
-                # 解码计算重构误差（loss）
-                x_recon = sae.decode(z)
-                loss = ((x_recon - x_flat) ** 2).mean().item()  # MSE loss
-                recon_mse_per_token = ((x_recon - x_flat) ** 2).mean(dim=-1).cpu()  # [B*L]
+                with torch.no_grad():
+                    # SAE编码
+                    z, topk_idx, topk_val = sae.encode(x_flat)  # z: [B*L, d_hidden]
+                    logger.debug("    %s: 编码完成, z.shape=%s", key, z.shape)
 
-                # 计算稀疏度
-                sparsity = (z.abs() > 1e-6).float().mean().item()
-                num_activations = (z.abs() > 1e-6).sum(dim=-1).float().mean().item()
+                    # 解码计算重构误差（loss）
+                    x_recon = sae.decode(z)
+                    loss = ((x_recon - x_flat) ** 2).mean().item()  # MSE loss
+                    recon_mse_per_token = ((x_recon - x_flat) ** 2).mean(dim=-1).cpu()  # [B*L]
 
-            z = z.view(b, l, -1)  # [B, L, d_hidden]
-            z_mean = z.mean(dim=1).cpu()  # [B, d_hidden]
-            z_std = z.std(dim=1).cpu()  # [B, d_hidden]
+                    # 计算稀疏度
+                    sparsity = (z.abs() > 1e-6).float().mean().item()
+                    num_activations = (z.abs() > 1e-6).sum(dim=-1).float().mean().item()
 
-            # 计算每个prompt的平均loss（按token平均）
-            recon_mse_per_prompt = recon_mse_per_token.view(b, l).mean(dim=1)  # [B]
+                z = z.view(b, l, -1)  # [B, L, d_hidden]
+                z_mean = z.mean(dim=1).cpu()  # [B, d_hidden]
+                z_std = z.std(dim=1).cpu()  # [B, d_hidden]
 
-            mode, layer_str = key.split(".")
-            layer_idx = int(layer_str.replace("layer", ""))
+                # 计算每个prompt的平均loss（按token平均）
+                recon_mse_per_prompt = recon_mse_per_token.view(b, l).mean(dim=1)  # [B]
 
-            for i in range(B):
-                result_id = f"batch{batch_count}_idx{i}_{key}"
-                item: Dict[str, Any] = {
+                mode, layer_str = key.split(".")
+                layer_idx = int(layer_str.replace("layer", ""))
+
+                for i in range(B):
+                    result_id = f"batch{batch_count}_idx{i}_{key}"
+                    item: Dict[str, Any] = {
                     "prompt": batch[i],
                     "hook_type": mode,
                     "layer_idx": layer_idx,
@@ -582,6 +616,11 @@ def main():
                     log_record["topk_val_token0"] = item["topk_val_token0"].tolist()
 
                 log_managers[key].log_result(log_record, result_id=result_id)
+
+            except Exception as e:
+                logger.error("批次 [%d/%d] Key %s 的 SAE 处理失败: %s", batch_count, total_batches, key, e)
+                logger.error("错误详情: act.shape=%s, sae=%s", act.shape if 'act' in locals() else 'N/A', key)
+                raise RuntimeError(f"批次 {batch_count} Key {key} 的 SAE 处理失败: {e}") from e
 
         # 打印进度
         if batch_count % log_params["log_interval"] == 0 or batch_count == total_batches:
@@ -646,4 +685,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("用户中断")
+        sys.exit(1)
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error("运行失败: %s", e)
+        logger.error("=" * 60)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
