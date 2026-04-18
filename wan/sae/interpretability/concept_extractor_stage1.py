@@ -418,8 +418,11 @@ class PairedActivationCollector:
                         f"d_model={sae_cfg.d_model}, d_hidden={sae_cfg.d_hidden}, "
                         f"sparsity={sae_cfg.sparsity}, top_k={sae_cfg.top_k}"
                     )
-                    logger.debug(f"    编码器形状: {io.sae.W_enc.shape}")
-                    logger.debug(f"    解码器形状: {io.sae.W_dec.shape}")
+                    # 获取权重形状（兼容不同SAE实现）
+                    if hasattr(io.sae, 'encoder') and hasattr(io.sae.encoder, 'weight'):
+                        logger.debug(f"    编码器形状: {io.sae.encoder.weight.shape}")
+                    if hasattr(io.sae, 'decoder') and hasattr(io.sae.decoder, 'weight'):
+                        logger.debug(f"    解码器形状: {io.sae.decoder.weight.shape}")
                     logger.debug(f"    配置来源: {io._config_source if hasattr(io, '_config_source') else 'unknown'}")
                     logger.debug(f"    SAE参数量: {sum(p.numel() for p in io.sae.parameters()):,}")
 
