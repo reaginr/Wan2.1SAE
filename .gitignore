@@ -1,8 +1,8 @@
 .*
 *.py[cod]
-# *.jpg
+*.jpg
 *.jpeg
-# *.png
+*.png
 *.gif
 *.bmp
 *.mp4
@@ -10,7 +10,8 @@
 *.mkv
 *.log
 *.zip
-*.pt
+*.pt        # 忽略所有 .pt 模型文件
+!latest.pt  # 例外：唯独 latest.pt 不忽略，允许上传
 *.pth
 *.ckpt
 *.safetensors
@@ -35,3 +36,6 @@ Wan2.1-T2V-1.3B/
 Wan2.1-I2V-14B-480P/
 Wan2.1-I2V-14B-720P/
 poetry.lock
+simulate/
+nsfw_detect/
+未来计划.txt
