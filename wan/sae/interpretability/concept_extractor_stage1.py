@@ -479,21 +479,22 @@ class PairedActivationCollector:
         logger.debug(f"  文本编码: prompt='{prompt[:50]}...'")
         try:
             self.wrapper.text_encoder.model.to(self.device)
-            context = self.wrapper.text_encoder([prompt], self.device)
+            context_raw = self.wrapper.text_encoder([prompt], self.device)
 
-            # 处理context可能是列表的情况
-            if isinstance(context, list):
-                if len(context) == 1:
-                    context = context[0]
-                else:
-                    context = torch.cat(context, dim=0) if all(isinstance(c, torch.Tensor) for c in context) else context
-
-            logger.debug(f"  文本编码完成: context类型={type(context).__name__}")
-            if hasattr(context, 'shape'):
-                logger.debug(f"    context形状={context.shape}")
-                logger.debug(f"    context dtype={context.dtype}, device={context.device}")
+            # 确保context是一个列表，每个元素是2D tensor
+            # model.forward期望: context = [tensor_1, tensor_2, ...]，每个tensor是[L, C]
+            if isinstance(context_raw, torch.Tensor):
+                # 单个tensor，包装成列表
+                context = [context_raw]
+            elif isinstance(context_raw, list):
+                # 已经是列表，直接使用
+                context = context_raw
             else:
-                logger.debug(f"    context={context}")
+                raise ValueError(f"未知的context类型: {type(context_raw)}")
+
+            logger.debug(f"  文本编码完成: context是包含{len(context)}个元素的列表")
+            for i, c in enumerate(context):
+                logger.debug(f"    context[{i}]: 形状={c.shape}, dtype={c.dtype}")
         except Exception as e:
             logger.error(f"文本编码失败: {e}")
             logger.error(f"详细错误:", exc_info=True)
@@ -505,18 +506,19 @@ class PairedActivationCollector:
             neg_p = negative_prompt if negative_prompt else self.wrapper.sample_neg_prompt
             logger.debug(f"  CFG启用: negative_prompt='{neg_p[:50]}...'")
             try:
-                context_null = self.wrapper.text_encoder([neg_p], self.device)
+                context_null_raw = self.wrapper.text_encoder([neg_p], self.device)
 
-                # 同样处理可能是列表的情况
-                if isinstance(context_null, list):
-                    if len(context_null) == 1:
-                        context_null = context_null[0]
-                    else:
-                        context_null = torch.cat(context_null, dim=0) if all(isinstance(c, torch.Tensor) for c in context_null) else context_null
+                # 同样确保context_null是一个列表
+                if isinstance(context_null_raw, torch.Tensor):
+                    context_null = [context_null_raw]
+                elif isinstance(context_null_raw, list):
+                    context_null = context_null_raw
+                else:
+                    raise ValueError(f"未知的context_null类型: {type(context_null_raw)}")
 
-                logger.debug(f"  CFG文本编码完成: context_null类型={type(context_null).__name__}")
-                if hasattr(context_null, 'shape'):
-                    logger.debug(f"    context_null形状={context_null.shape}")
+                logger.debug(f"  CFG文本编码完成: context_null是包含{len(context_null)}个元素的列表")
+                for i, c in enumerate(context_null):
+                    logger.debug(f"    context_null[{i}]: 形状={c.shape}")
             except Exception as e:
                 logger.error(f"CFG文本编码失败: {e}")
                 logger.error(f"详细错误:", exc_info=True)
