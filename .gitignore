@@ -10,9 +10,12 @@
 *.mkv
 *.log
 *.zip
+# 全局忽略所有pt权重文件
 *.pt
-ckpt/sae_runs/**/sae_step*.pt # 仅忽略包含 "step" 的 ckpt 文件
-!ckpt/sae_runs/**/sae_latest.pt # 保留 sae_latest.pt 文件
+# 【例外1】只放行这个目录下的 sae_latest.pt（你唯一要上传的pt）
+!ckpt/sae_runs/exp__20250324/block_out.layer15/sae_latest.pt
+# 【例外2】放行该目录下所有json配置文件（你要上传的配置）
+!ckpt/sae_runs/exp__20250324/block_out.layer15/*.json
 *.pth
 *.ckpt
 *.safetensors
