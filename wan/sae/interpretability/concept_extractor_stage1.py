@@ -480,8 +480,20 @@ class PairedActivationCollector:
         try:
             self.wrapper.text_encoder.model.to(self.device)
             context = self.wrapper.text_encoder([prompt], self.device)
-            logger.debug(f"  文本编码完成: context形状={context.shape}")
-            logger.debug(f"    context dtype={context.dtype}, device={context.device}")
+
+            # 处理context可能是列表的情况
+            if isinstance(context, list):
+                if len(context) == 1:
+                    context = context[0]
+                else:
+                    context = torch.cat(context, dim=0) if all(isinstance(c, torch.Tensor) for c in context) else context
+
+            logger.debug(f"  文本编码完成: context类型={type(context).__name__}")
+            if hasattr(context, 'shape'):
+                logger.debug(f"    context形状={context.shape}")
+                logger.debug(f"    context dtype={context.dtype}, device={context.device}")
+            else:
+                logger.debug(f"    context={context}")
         except Exception as e:
             logger.error(f"文本编码失败: {e}")
             logger.error(f"详细错误:", exc_info=True)
@@ -494,7 +506,17 @@ class PairedActivationCollector:
             logger.debug(f"  CFG启用: negative_prompt='{neg_p[:50]}...'")
             try:
                 context_null = self.wrapper.text_encoder([neg_p], self.device)
-                logger.debug(f"  CFG文本编码完成: context_null形状={context_null.shape}")
+
+                # 同样处理可能是列表的情况
+                if isinstance(context_null, list):
+                    if len(context_null) == 1:
+                        context_null = context_null[0]
+                    else:
+                        context_null = torch.cat(context_null, dim=0) if all(isinstance(c, torch.Tensor) for c in context_null) else context_null
+
+                logger.debug(f"  CFG文本编码完成: context_null类型={type(context_null).__name__}")
+                if hasattr(context_null, 'shape'):
+                    logger.debug(f"    context_null形状={context_null.shape}")
             except Exception as e:
                 logger.error(f"CFG文本编码失败: {e}")
                 logger.error(f"详细错误:", exc_info=True)
