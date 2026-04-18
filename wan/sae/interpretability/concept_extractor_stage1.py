@@ -586,7 +586,7 @@ class PairedActivationCollector:
                 logger.debug(f"    开始模型前向传播...")
                 logger.debug(f"      latents数量: {len(latents)}, 形状: {[l.shape for l in latents]}")
                 logger.debug(f"      t_tensor: {t_tensor}")
-                logger.debug(f"      context形状: {context.shape}")
+                logger.debug(f"      context: 列表含{len(context)}个元素, 形状: {[c.shape for c in context]}")
                 logger.debug(f"      seq_len: {self.seq_len}")
                 logger.debug(f"      amp dtype: {self.cfg.param_dtype}")
 
