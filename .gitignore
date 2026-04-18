@@ -14,12 +14,12 @@
 *.pt
 # 【例外1】只放行这个目录下的 sae_latest.pt（你唯一要上传的pt）
 !ckpt/sae_runs/exp__20250324/block_out.layer15/sae_latest.pt
+*.json
 # 【例外2】放行该目录下所有json配置文件（你要上传的配置）
 !ckpt/sae_runs/exp__20250324/block_out.layer15/*.json
 *.pth
 *.ckpt
 *.safetensors
-*.json
 # *.txt
 *.backup
 *.pkl
