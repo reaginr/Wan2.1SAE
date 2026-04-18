@@ -1,0 +1,14 @@
+{
+  "sae": {
+    "d_model": 1536,
+    "d_hidden": 6144,
+    "activation": "relu",
+    "sparsity": "topk",
+    "top_k": 64,
+    "l1_lambda": 0.001
+  },
+  "hook": {
+    "hook_mode": "block_out",
+    "layer_idx": 15
+  }
+}
