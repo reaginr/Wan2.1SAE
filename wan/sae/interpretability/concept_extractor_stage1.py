@@ -313,6 +313,19 @@ class PairedActivationCollector:
         logger.debug(f"    ffn_dim={cfg.ffn_dim}")
 
         try:
+            logger.info(f"  开始初始化WanT2V（这可能需要几分钟）...")
+            logger.debug(f"    checkpoint_dir={model_path}")
+            logger.debug(f"    检查路径存在: {Path(model_path).exists()}")
+
+            # 列出路径内容帮助诊断
+            if Path(model_path).exists():
+                files = list(Path(model_path).glob("*.pth")) + list(Path(model_path).glob("*.pt"))
+                logger.debug(f"    找到 {len(files)} 个模型文件")
+                for f in files[:5]:
+                    logger.debug(f"      - {f.name}")
+
+            logger.info(f"  调用WanT2V初始化...")
+            start_time = time.time()
             self.wrapper = WanT2V(
                 config=cfg,
                 checkpoint_dir=model_path,
@@ -323,8 +336,18 @@ class PairedActivationCollector:
                 use_usp=False,
                 t5_cpu=False,
             )
+            init_time = time.time() - start_time
+            logger.info(f"  WanT2V初始化完成，耗时: {init_time:.1f}s")
+
+            logger.info(f"  获取model...")
             self.model = self.wrapper.model
-            self.model.eval().requires_grad_(False).to(device)
+
+            logger.info(f"  设置eval模式...")
+            self.model.eval().requires_grad_(False)
+
+            logger.info(f"  移动到设备 {device}...")
+            self.model = self.model.to(device)
+
             self.cfg = cfg
             logger.info("WanT2V模型加载成功")
             logger.debug(f"  model类型: {type(self.model)}")
