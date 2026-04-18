@@ -167,6 +167,20 @@ sampling_params = {
     "negative_prompt": "",
 }
 
+# --------------------------- SAE分析配置 ---------------------------
+analysis_params = {
+    # compute_sae_loss: 是否计算SAE重建loss
+    # True = 调用SAE.forward(return_loss=True)，记录重建质量和稀疏度
+    # False = 只调用encode（更快，内存占用更少）
+    # 建议：首次运行或调试时开启，大规模采集时关闭
+    "compute_sae_loss": False,
+
+    # save_reconstruction: 是否保存SAE重建的DiT状态（x_hat）
+    # 只有compute_sae_loss=True时有效
+    # 注意：会大幅增加存储开销（约2倍）
+    "save_reconstruction": False,
+}
+
 # --------------------------- 生成尺寸配置 ---------------------------
 generation_params = {
     # 必须与SAE训练时一致
@@ -267,6 +281,8 @@ class PairedActivationCollector:
         use_cfg: bool = False,
         guide_scale: float = 5.0,
         seed: int = 0,
+        compute_sae_loss: bool = False,
+        save_reconstruction: bool = False,
     ):
         self.model_path = model_path
         self.sae_run_dir = sae_run_dir
@@ -279,30 +295,56 @@ class PairedActivationCollector:
         self.use_cfg = use_cfg
         self.guide_scale = guide_scale
         self.seed = seed
+        self.compute_sae_loss = compute_sae_loss
+        self.save_reconstruction = save_reconstruction
 
         # 加载WanT2V（复用训练代码逻辑）
         logger.info("=" * 60)
         logger.info("加载WanT2V模型...")
+        logger.debug(f"  model_path={model_path}")
+        logger.debug(f"  device={device}")
+        logger.debug(f"  size_wh={size_wh}, frame_num={frame_num}")
+
         cfg = t2v_1_3B
-        self.wrapper = WanT2V(
-            config=cfg,
-            checkpoint_dir=model_path,
-            device_id=device.index if device.index is not None else 0,
-            rank=0,
-            t5_fsdp=False,
-            dit_fsdp=False,
-            use_usp=False,
-            t5_cpu=False,
-        )
-        self.model = self.wrapper.model
-        self.model.eval().requires_grad_(False).to(device)
-        self.cfg = cfg
+        logger.debug(f"  使用配置: t2v_1_3B")
+        logger.debug(f"    base_dim={cfg.base_dim}")
+        logger.debug(f"    num_blocks={len(cfg.blocks)}")
+        logger.debug(f"    dit_model_dim={cfg.dit_model_dim}")
+
+        try:
+            self.wrapper = WanT2V(
+                config=cfg,
+                checkpoint_dir=model_path,
+                device_id=device.index if device.index is not None else 0,
+                rank=0,
+                t5_fsdp=False,
+                dit_fsdp=False,
+                use_usp=False,
+                t5_cpu=False,
+            )
+            self.model = self.wrapper.model
+            self.model.eval().requires_grad_(False).to(device)
+            self.cfg = cfg
+            logger.info("WanT2V模型加载成功")
+            logger.debug(f"  model类型: {type(self.model)}")
+            logger.debug(f"  模型参数量: {sum(p.numel() for p in self.model.parameters()):,}")
+        except Exception as e:
+            logger.error(f"WanT2V模型加载失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
         # 计算latent形状
-        vae_z_dim = self.wrapper.vae.model.z_dim
-        self.latent_shape = compute_latent_shape(cfg, size_wh, frame_num, vae_z_dim)
-        self.seq_len = compute_seq_len(cfg, self.latent_shape, self.wrapper.sp_size)
-        logger.info(f"Latent shape={self.latent_shape}, seq_len={self.seq_len}")
+        try:
+            vae_z_dim = self.wrapper.vae.model.z_dim
+            self.latent_shape = compute_latent_shape(cfg, size_wh, frame_num, vae_z_dim)
+            self.seq_len = compute_seq_len(cfg, self.latent_shape, self.wrapper.sp_size)
+            logger.info(f"Latent shape={self.latent_shape}, seq_len={self.seq_len}")
+            logger.debug(f"  vae_z_dim={vae_z_dim}")
+            logger.debug(f"  sp_size={self.wrapper.sp_size}")
+        except Exception as e:
+            logger.error(f"计算latent形状失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
         # 计算所有hook层（SAE层 + DiT层，去重）
         all_hook_layers = list(set(sae_layers + save_dit_layers))
@@ -313,14 +355,29 @@ class PairedActivationCollector:
         if sae_layers:
             logger.info("-" * 60)
             logger.info("加载SAE模型（复用SAECheckpointIO接口）...")
+            logger.debug(f"  sae_run_dir={sae_run_dir}")
+            logger.debug(f"  hook_mode={hook_mode}")
+            logger.debug(f"  目标层: {sae_layers}")
+
             for layer_idx in sae_layers:
+                logger.debug(f"  正在定位SAE layer{layer_idx}...")
                 loc = SAERunLocator(
                     run_dir=sae_run_dir,
                     hook_mode=hook_mode,
                     layer_idx=layer_idx,
                 )
+
+                # 检查checkpoint路径
+                ckpt_path = loc.latest_ckpt_path()
+                config_path = loc.config_path()
+                logger.debug(f"    checkpoint路径: {ckpt_path}")
+                logger.debug(f"    config路径: {config_path}")
+                logger.debug(f"    checkpoint存在: {ckpt_path.exists()}")
+                logger.debug(f"    config存在: {config_path.exists()}")
+
                 try:
                     # 复用现有接口：自动兼容新旧格式
+                    logger.debug(f"    开始加载SAE layer{layer_idx}...")
                     io = SAECheckpointIO.load(
                         loc,
                         device=device,
@@ -329,21 +386,43 @@ class PairedActivationCollector:
                     )
                     io.sae.eval()
                     self.saes[layer_idx] = io.sae
+
+                    # 详细日志
+                    sae_cfg = io.sae_config
                     logger.info(
                         f"  已加载SAE layer{layer_idx}: "
-                        f"d_hidden={io.sae_config.d_hidden}, "
-                        f"source={io._config_source if hasattr(io, '_config_source') else 'unknown'}"
+                        f"d_model={sae_cfg.d_model}, d_hidden={sae_cfg.d_hidden}, "
+                        f"sparsity={sae_cfg.sparsity}, top_k={sae_cfg.top_k}"
                     )
+                    logger.debug(f"    编码器形状: {io.sae.W_enc.shape}")
+                    logger.debug(f"    解码器形状: {io.sae.W_dec.shape}")
+                    logger.debug(f"    配置来源: {io._config_source if hasattr(io, '_config_source') else 'unknown'}")
+                    logger.debug(f"    SAE参数量: {sum(p.numel() for p in io.sae.parameters()):,}")
+
+                except FileNotFoundError as e:
+                    logger.error(f"  SAE checkpoint文件不存在: {e}")
+                    logger.error(f"  请检查路径: {ckpt_path}")
+                    logger.error(f"详细错误:", exc_info=True)
+                    raise
                 except Exception as e:
                     logger.error(f"  加载SAE layer{layer_idx}失败: {e}")
+                    logger.error(f"详细错误:", exc_info=True)
                     raise
+            logger.info(f"成功加载 {len(self.saes)} 个SAE模型")
             logger.info("-" * 60)
 
         # 显存信息
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated(device) / 1024**3
+            reserved = torch.cuda.memory_reserved(device) / 1024**3
             total = torch.cuda.get_device_properties(device).total_memory / 1024**3
             logger.info(f"模型加载后显存: {allocated:.2f}GB / {total:.2f}GB")
+            logger.debug(f"  已分配: {allocated:.3f} GB")
+            logger.debug(f"  已预留: {reserved:.3f} GB")
+            logger.debug(f"  总计: {total:.3f} GB")
+            logger.debug(f"  GPU: {torch.cuda.get_device_name(device)}")
+        else:
+            logger.warning("CUDA不可用，使用CPU模式")
         logger.info("=" * 60)
 
     def _collect_single_prompt(
@@ -367,39 +446,73 @@ class PairedActivationCollector:
                 "dit_layer{idx}": [T, L, 1536],  # 如果配置了保存
             }
         """
+        logger.debug(f"_collect_single_prompt开始: prompt='{prompt[:50]}...', pair_idx={pair_idx}")
+
         # 文本编码
-        self.wrapper.text_encoder.model.to(self.device)
-        context = self.wrapper.text_encoder([prompt], self.device)
+        logger.debug(f"  文本编码: prompt='{prompt[:50]}...'")
+        try:
+            self.wrapper.text_encoder.model.to(self.device)
+            context = self.wrapper.text_encoder([prompt], self.device)
+            logger.debug(f"  文本编码完成: context形状={context.shape}")
+            logger.debug(f"    context dtype={context.dtype}, device={context.device}")
+        except Exception as e:
+            logger.error(f"文本编码失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
         # CFG准备
         context_null = None
         if self.use_cfg:
             neg_p = negative_prompt if negative_prompt else self.wrapper.sample_neg_prompt
-            context_null = self.wrapper.text_encoder([neg_p], self.device)
+            logger.debug(f"  CFG启用: negative_prompt='{neg_p[:50]}...'")
+            try:
+                context_null = self.wrapper.text_encoder([neg_p], self.device)
+                logger.debug(f"  CFG文本编码完成: context_null形状={context_null.shape}")
+            except Exception as e:
+                logger.error(f"CFG文本编码失败: {e}")
+                logger.error(f"详细错误:", exc_info=True)
+                raise
+        else:
+            logger.debug(f"  CFG禁用")
 
         # 初始化结果收集器
         sae_results = {layer_idx: [] for layer_idx in self.sae_layers}
         dit_results = {layer_idx: [] for layer_idx in self.save_dit_layers}
+        logger.debug(f"  初始化结果收集器: SAE层={self.sae_layers}, DiT层={self.save_dit_layers}")
 
         # 生成初始噪声（复用训练代码逻辑）
         # 使用pair_idx作为种子的一部分，确保同一pair正负样本使用不同的噪声
+        logger.debug(f"  生成初始噪声: seed={self.seed}, pair_idx={pair_idx}")
         seed_g = torch.Generator(device=self.device)
         seed_val = (self.seed + pair_idx * 1000) % (2**32)  # 避免溢出
         seed_g.manual_seed(seed_val)
-        latent = torch.randn(
-            self.latent_shape[0],
-            self.latent_shape[1],
-            self.latent_shape[2],
-            self.latent_shape[3],
-            dtype=torch.float32,
-            device=self.device,
-            generator=seed_g,
-        )
-        # 保持与训练代码一致：使用list
-        latents = [latent]
+        logger.debug(f"    实际使用seed: {seed_val}")
+
+        try:
+            latent = torch.randn(
+                self.latent_shape[0],
+                self.latent_shape[1],
+                self.latent_shape[2],
+                self.latent_shape[3],
+                dtype=torch.float32,
+                device=self.device,
+                generator=seed_g,
+            )
+            # 保持与训练代码一致：使用list
+            latents = [latent]
+            logger.debug(f"  初始latent生成完成: 形状={latent.shape}, dtype={latent.dtype}")
+            logger.debug(f"    latent范围: [{latent.min():.3f}, {latent.max():.3f}], 均值={latent.mean():.3f}")
+        except Exception as e:
+            logger.error(f"生成初始噪声失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
         # 遍历所有时间步
-        for t_val in timesteps:
+        num_timesteps = len(timesteps)
+        logger.debug(f"  开始遍历 {num_timesteps} 个时间步")
+
+        for step_idx, t_val in enumerate(timesteps):
+            logger.debug(f"  [timestep {step_idx+1}/{num_timesteps}] t={t_val}")
             t_tensor = torch.tensor([t_val], device=self.device, dtype=torch.long)
 
             # Hook收集
@@ -407,7 +520,9 @@ class PairedActivationCollector:
 
             def on_tensor(k: str, v: torch.Tensor):
                 raw[k] = v  # [1, L, C]
+                logger.debug(f"    Hook捕获: {k}, 形状={v.shape}, dtype={v.dtype}")
 
+            logger.debug(f"    注册Hooks: layers={self.all_hook_layers}, mode={self.hook_mode}")
             handles = register_dit_hooks(
                 self.model,
                 hook_layers=self.all_hook_layers,
@@ -417,69 +532,173 @@ class PairedActivationCollector:
 
             try:
                 # 使用简单Euler方法（稳定可靠，与Hook机制兼容）
+                logger.debug(f"    开始模型前向传播...")
+                logger.debug(f"      latents数量: {len(latents)}, 形状: {[l.shape for l in latents]}")
+                logger.debug(f"      t_tensor: {t_tensor}")
+                logger.debug(f"      context形状: {context.shape}")
+                logger.debug(f"      seq_len: {self.seq_len}")
+                logger.debug(f"      amp dtype: {self.cfg.param_dtype}")
+
                 with torch.no_grad(), amp.autocast(dtype=self.cfg.param_dtype):
                     # 条件分支
-                    noise_pred_cond = self.model(
-                        latents, t=t_tensor, context=context, seq_len=self.seq_len
-                    )
+                    logger.debug(f"      运行条件分支...")
+                    try:
+                        noise_pred_cond = self.model(
+                            latents, t=t_tensor, context=context, seq_len=self.seq_len
+                        )
+                        logger.debug(f"      条件分支完成: 输出数量={len(noise_pred_cond)}")
+                        logger.debug(f"        输出形状: {[p.shape for p in noise_pred_cond]}")
+                        logger.debug(f"        输出范围: [{noise_pred_cond[0].min():.3f}, {noise_pred_cond[0].max():.3f}]")
+                    except Exception as e:
+                        logger.error(f"条件分支失败: {e}")
+                        logger.error(f"详细错误:", exc_info=True)
+                        raise
 
                     # CFG无条件分支
                     if self.use_cfg and context_null is not None:
-                        noise_pred_uncond = self.model(
-                            latents, t=t_tensor, context=context_null, seq_len=self.seq_len
-                        )
-                        # 合并预测
-                        pred = [
-                            u + self.guide_scale * (c - u)
-                            for c, u in zip(noise_pred_cond, noise_pred_uncond)
-                        ]
+                        logger.debug(f"      运行CFG无条件分支...")
+                        try:
+                            noise_pred_uncond = self.model(
+                                latents, t=t_tensor, context=context_null, seq_len=self.seq_len
+                            )
+                            logger.debug(f"      无条件分支完成")
+                            # 合并预测
+                            pred = [
+                                u + self.guide_scale * (c - u)
+                                for c, u in zip(noise_pred_cond, noise_pred_uncond)
+                            ]
+                            logger.debug(f"      CFG合并完成: guide_scale={self.guide_scale}")
+                        except Exception as e:
+                            logger.error(f"CFG分支失败: {e}")
+                            logger.error(f"详细错误:", exc_info=True)
+                            raise
                     else:
                         pred = noise_pred_cond
+                        logger.debug(f"      跳过CFG（未启用或无negative prompt）")
 
                     # Euler更新: z_next = z - pred * dt
-                    dt = 1.0 / len(timesteps)
+                    dt = 1.0 / num_timesteps
+                    logger.debug(f"      Euler更新: dt={dt:.6f}")
                     new_latents = []
-                    for p, z in zip(pred, latents):
+                    for i, (p, z) in enumerate(zip(pred, latents)):
                         z_next = z - p * dt
                         new_latents.append(z_next)
+                        logger.debug(f"        latent[{i}]: 原范围=[{z.min():.3f}, {z.max():.3f}], 新范围=[{z_next.min():.3f}, {z_next.max():.3f}]")
                     latents = new_latents
+                    logger.debug(f"      Euler更新完成")
 
+            except Exception as e:
+                logger.error(f"timestep {t_val} 处理失败: {e}")
+                logger.error(f"详细错误:", exc_info=True)
+                raise
             finally:
                 remove_hooks(handles)
+                logger.debug(f"    Hooks已移除, 捕获到 {len(raw)} 个张量")
 
             # 处理收集到的激活
+            logger.debug(f"    处理捕获的激活: {list(raw.keys())}")
             for layer_idx in self.all_hook_layers:
                 layer_key = f"{self.hook_mode}.layer{layer_idx}"
                 if layer_key not in raw:
+                    logger.warning(f"    警告: {layer_key} 不在raw中")
                     continue
 
                 h = raw[layer_key]  # [1, L, C]
+                logger.debug(f"      处理 {layer_key}: 形状={h.shape}")
+
                 # 保持原始形状用于保存 [L, C]
                 h_np = h.cpu().numpy()[0]  # [L, C]
+                logger.debug(f"      转换为numpy: 形状={h_np.shape}, dtype={h_np.dtype}")
 
                 # 保存DiT状态（如果配置了）- 保存原始DiT输出
                 if layer_idx in dit_results:
                     dit_results[layer_idx].append(h_np)
+                    logger.debug(f"      -> 保存到dit_results[{layer_idx}]")
 
                 # SAE编码并保存（如果配置了）
                 if layer_idx in self.saes:
                     sae = self.saes[layer_idx]
+                    logger.debug(f"      SAE编码 layer{layer_idx}...")
                     with torch.no_grad():
                         # SAE期望2D输入 [N, d_model]，需要reshape
                         # h: [1, L, C] -> [L, C] (即 [N, d_model])
                         h_2d = h.reshape(-1, h.shape[-1])  # [L, C]
-                        z, _, _ = sae.encode(h_2d)  # [L, d_hidden]
-                        z_np = z.cpu().numpy()  # [L, d_hidden]
+                        logger.debug(f"        输入reshape: {h.shape} -> {h_2d.shape}")
+
+                        try:
+                            if self.compute_sae_loss:
+                                # 调用forward计算loss（包含decode重建）
+                                logger.debug(f"        调用SAE forward (compute_sae_loss=True)...")
+                                x_hat, z, loss = sae(h_2d, return_loss=True)
+                                logger.debug(f"        SAE forward完成: z形状={z.shape}, loss={loss.item():.6f}")
+
+                                # 计算重建MSE
+                                recon_mse = torch.nn.functional.mse_loss(x_hat, h_2d).item()
+                                logger.debug(f"          reconstruction MSE: {recon_mse:.6f}")
+
+                                # 记录sparsity（激活比例）
+                                if sae.config.sparsity == "topk":
+                                    sparsity = (z != 0).float().mean().item()
+                                else:
+                                    sparsity = (z.abs() > 1e-6).float().mean().item()
+                                logger.debug(f"          activation sparsity: {sparsity:.4f} ({sparsity*100:.2f}%)")
+
+                                # 可选：保存重建结果
+                                if self.save_reconstruction:
+                                    # 保存重建的DiT状态（x_hat）
+                                    x_hat_np = x_hat.cpu().numpy().reshape(h.shape[0], h.shape[1], -1)  # [1, L, C]
+                                    # 这里需要额外的存储逻辑
+                                    logger.debug(f"          重建结果形状: {x_hat_np.shape}")
+
+                                z_np = z.cpu().numpy()  # [L, d_hidden]
+                            else:
+                                # 只调用encode（更快）
+                                z, info = sae.encode(h_2d)  # [L, d_hidden]
+                                logger.debug(f"        SAE编码完成: z形状={z.shape}")
+                                logger.debug(f"          sparsity={info.get('sparsity', 'N/A') if info else 'N/A'}")
+                                z_np = z.cpu().numpy()  # [L, d_hidden]
+                                logger.debug(f"        转换为numpy: 形状={z_np.shape}")
+                        except Exception as e:
+                            logger.error(f"SAE编码失败: {e}")
+                            logger.error(f"详细错误:", exc_info=True)
+                            raise
+
                     sae_results[layer_idx].append(z_np)
+                    logger.debug(f"      -> 保存到sae_results[{layer_idx}]")
+
+            logger.debug(f"  [timestep {step_idx+1}/{num_timesteps}] 完成")
+
+        logger.debug(f"  所有时间步完成: sae_results={ {k: len(v) for k, v in sae_results.items()} }, dit_results={ {k: len(v) for k, v in dit_results.items()} }")
 
         # 合并时间步 [T, L, D]
+        logger.debug(f"  合并时间步结果...")
         output = {}
+
         for layer_idx, acts in sae_results.items():
             if acts:
-                output[f"sae_layer{layer_idx}"] = np.stack(acts, axis=0)
+                try:
+                    stacked = np.stack(acts, axis=0)
+                    output[f"sae_layer{layer_idx}"] = stacked
+                    logger.debug(f"    sae_layer{layer_idx}: 合并 {len(acts)} 个时间步 -> 形状 {stacked.shape}")
+                except Exception as e:
+                    logger.error(f"合并sae_layer{layer_idx}失败: {e}")
+                    logger.error(f"详细错误:", exc_info=True)
+                    raise
+
         for layer_idx, acts in dit_results.items():
             if acts:
-                output[f"dit_layer{layer_idx}"] = np.stack(acts, axis=0)
+                try:
+                    stacked = np.stack(acts, axis=0)
+                    output[f"dit_layer{layer_idx}"] = stacked
+                    logger.debug(f"    dit_layer{layer_idx}: 合并 {len(acts)} 个时间步 -> 形状 {stacked.shape}")
+                except Exception as e:
+                    logger.error(f"合并dit_layer{layer_idx}失败: {e}")
+                    logger.error(f"详细错误:", exc_info=True)
+                    raise
+
+        logger.debug(f"  _collect_single_prompt完成: 输出键={list(output.keys())}")
+        for k, v in output.items():
+            logger.debug(f"    {k}: 形状={v.shape}, dtype={v.dtype}, 范围=[{v.min():.3f}, {v.max():.3f}]")
 
         return output
 
@@ -502,17 +721,36 @@ class PairedActivationCollector:
             每个dict包含sae_layer{idx}和dit_layer{idx}
         """
         logger.info(f"  采集pair {pair_idx}: 正样本")
-        pos_acts = self._collect_single_prompt(
-            pos_prompt, timesteps, pair_idx,
-            negative_prompt=negative_prompt if self.use_cfg else ""
-        )
+        logger.debug(f"    正样本prompt: '{pos_prompt[:80]}...'")
+        try:
+            pos_acts = self._collect_single_prompt(
+                pos_prompt, timesteps, pair_idx,
+                negative_prompt=negative_prompt if self.use_cfg else ""
+            )
+            logger.info(f"  采集pair {pair_idx}: 正样本完成")
+            for k, v in pos_acts.items():
+                logger.debug(f"    {k}: {v.shape}")
+        except Exception as e:
+            logger.error(f"采集pair {pair_idx}正样本失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
         logger.info(f"  采集pair {pair_idx}: 负样本")
-        neg_acts = self._collect_single_prompt(
-            neg_prompt, timesteps, pair_idx,
-            negative_prompt=negative_prompt if self.use_cfg else ""
-        )
+        logger.debug(f"    负样本prompt: '{neg_prompt[:80]}...'")
+        try:
+            neg_acts = self._collect_single_prompt(
+                neg_prompt, timesteps, pair_idx,
+                negative_prompt=negative_prompt if self.use_cfg else ""
+            )
+            logger.info(f"  采集pair {pair_idx}: 负样本完成")
+            for k, v in neg_acts.items():
+                logger.debug(f"    {k}: {v.shape}")
+        except Exception as e:
+            logger.error(f"采集pair {pair_idx}负样本失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
+        logger.debug(f"  pair {pair_idx} 采集完成")
         return pos_acts, neg_acts
 
 
@@ -631,6 +869,16 @@ def main():
         help="负提示词（use_cfg=True时用于无条件分支，空=使用默认）"
     )
 
+    # SAE分析
+    parser.add_argument(
+        "--compute_sae_loss", action="store_true", default=analysis_params["compute_sae_loss"],
+        help="计算SAE重建loss（会调用forward，增加约10-20%计算开销）"
+    )
+    parser.add_argument(
+        "--save_reconstruction", action="store_true", default=analysis_params["save_reconstruction"],
+        help="保存SAE重建的DiT状态（大幅增加存储，需compute_sae_loss=True）"
+    )
+
     # 生成尺寸
     parser.add_argument("--size_w", type=int, default=generation_params["size_w"])
     parser.add_argument("--size_h", type=int, default=generation_params["size_h"])
@@ -643,13 +891,56 @@ def main():
     parser.add_argument("--device_id", type=int, default=system_params["device_id"])
     parser.add_argument("--seed", type=int, default=system_params["seed"])
 
+    # 日志
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="启用详细日志（DEBUG级别），显示所有调试信息")
+    parser.add_argument("--log_dir", type=str, default="logs",
+                        help="日志文件保存目录（默认: logs）")
+    parser.add_argument("--no_log_file", action="store_true",
+                        help="不保存日志到文件，只输出到控制台")
+
     args = parser.parse_args()
 
-    # 设置日志
+    # 创建日志目录
+    log_dir = Path(args.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 生成带时间戳的日志文件名
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_filename = f"stage1_{args.category}_{timestamp}.txt"
+    log_path = log_dir / log_filename
+
+    # 设置日志级别
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
+    if args.verbose:
+        log_format = "%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s"
+
+    # 配置handlers
+    handlers = [logging.StreamHandler(sys.stdout)]
+
+    if not args.no_log_file:
+        # 文件handler，使用UTF-8编码，每次运行创建新文件（时间戳不同）
+        file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        handlers.append(file_handler)
+
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
+        level=log_level,
+        format=log_format,
+        handlers=handlers,
     )
+
+    # 设置第三方库的日志级别
+    if not args.verbose:
+        logging.getLogger("transformers").setLevel(logging.WARNING)
+        logging.getLogger("diffusers").setLevel(logging.WARNING)
+        logging.getLogger("torch").setLevel(logging.WARNING)
+
+    # 记录日志文件位置
+    if not args.no_log_file:
+        print(f"日志文件: {log_path}", file=sys.stderr)
 
     # 设置设备
     device = torch.device(f"cuda:{args.device_id}" if torch.cuda.is_available() else "cpu")
@@ -674,6 +965,9 @@ def main():
     if args.use_cfg:
         logger.info(f"  guide_scale: {args.guide_scale}")
     logger.info(f"时间步数: {args.sampling_steps}")
+    logger.info(f"SAE Loss计算: {'启用（会增加10-20%计算开销）' if args.compute_sae_loss else '禁用'}")
+    if args.compute_sae_loss:
+        logger.info(f"  保存重建结果: {'是' if args.save_reconstruction else '否'}")
     logger.info("=" * 60)
 
     # 加载提示词
@@ -720,6 +1014,8 @@ def main():
         use_cfg=args.use_cfg,
         guide_scale=args.guide_scale,
         seed=args.seed,
+        compute_sae_loss=args.compute_sae_loss,
+        save_reconstruction=args.save_reconstruction,
     )
 
     # 初始化存储
@@ -771,8 +1067,11 @@ def main():
     logger.info("=" * 60)
     logger.info("开始配对提取...")
     logger.info("=" * 60)
+    logger.debug(f"总对数: {num_pairs}, 已完成: {len(completed_pairs)}")
 
     for pair_idx in range(num_pairs):
+        logger.debug(f"\n[主循环] pair_idx={pair_idx}")
+
         if pair_idx in completed_pairs:
             logger.info(f"[{pair_idx+1}/{num_pairs}] 已跳过（断点）")
             continue
@@ -783,15 +1082,41 @@ def main():
         logger.info(f"[{pair_idx+1}/{num_pairs}] 处理pair {pair_idx}")
         logger.info(f"  正: {pos_p[:50]}...")
         logger.info(f"  负: {neg_p[:50]}...")
+        logger.debug(f"    完整正样本prompt: '{pos_p}'")
+        logger.debug(f"    完整负样本prompt: '{neg_p}'")
 
         # 采集（使用简单Euler方法，支持可选CFG）
-        pos_acts, neg_acts = collector.collect_pair(
-            pos_prompt=pos_p,
-            neg_prompt=neg_p,
-            pair_idx=pair_idx,
-            timesteps=timesteps,
-            negative_prompt=args.negative_prompt,
-        )
+        try:
+            logger.debug(f"  开始采集pair {pair_idx}...")
+            start_time = time.time()
+            pos_acts, neg_acts = collector.collect_pair(
+                pos_prompt=pos_p,
+                neg_prompt=neg_p,
+                pair_idx=pair_idx,
+                timesteps=timesteps,
+                negative_prompt=args.negative_prompt,
+            )
+            elapsed = time.time() - start_time
+            logger.debug(f"  采集完成，耗时: {elapsed:.2f}s")
+
+            # 验证结果
+            logger.debug(f"  验证采集结果...")
+            if not pos_acts:
+                logger.error(f"  正样本采集结果为空！")
+                raise ValueError(f"pair {pair_idx} 正样本采集失败")
+            if not neg_acts:
+                logger.error(f"  负样本采集结果为空！")
+                raise ValueError(f"pair {pair_idx} 负样本采集失败")
+
+            for k, v in pos_acts.items():
+                logger.debug(f"    pos_acts[{k}]: 形状={v.shape}, dtype={v.dtype}")
+            for k, v in neg_acts.items():
+                logger.debug(f"    neg_acts[{k}]: 形状={v.shape}, dtype={v.dtype}")
+
+        except Exception as e:
+            logger.error(f"采集pair {pair_idx}失败: {e}")
+            logger.error(f"详细错误:", exc_info=True)
+            raise
 
         # 准备元信息
         pos_meta = [{
@@ -808,53 +1133,94 @@ def main():
             "category": args.category,
             "polarity": "neg",
         }]
+        logger.debug(f"  元信息准备完成")
 
         # 保存SAE激活
+        logger.debug(f"  保存SAE激活...")
         for layer_idx in sae_layers:
             key = f"sae_layer{layer_idx}"
+            logger.debug(f"    处理 layer{layer_idx}, key={key}")
+
             if key in pos_acts:
-                storage.save_activations_incremental(
-                    "sae", layer_idx, "pos",
-                    pos_acts[key][np.newaxis, ...],  # [1, T, L, D]
-                    pos_meta,
-                )
+                try:
+                    data = pos_acts[key][np.newaxis, ...]  # [1, T, L, D]
+                    logger.debug(f"      保存正样本: {data.shape}")
+                    storage.save_activations_incremental(
+                        "sae", layer_idx, "pos", data, pos_meta,
+                    )
+                    logger.debug(f"      正样本保存完成")
+                except Exception as e:
+                    logger.error(f"保存正样本失败 (layer{layer_idx}): {e}")
+                    logger.error(f"详细错误:", exc_info=True)
+                    raise
+
             if key in neg_acts:
-                storage.save_activations_incremental(
-                    "sae", layer_idx, "neg",
-                    neg_acts[key][np.newaxis, ...],
-                    neg_meta,
-                )
+                try:
+                    data = neg_acts[key][np.newaxis, ...]
+                    logger.debug(f"      保存负样本: {data.shape}")
+                    storage.save_activations_incremental(
+                        "sae", layer_idx, "neg", data, neg_meta,
+                    )
+                    logger.debug(f"      负样本保存完成")
+                except Exception as e:
+                    logger.error(f"保存负样本失败 (layer{layer_idx}): {e}")
+                    logger.error(f"详细错误:", exc_info=True)
+                    raise
 
         # 保存DiT激活（如果有）
-        for layer_idx in save_dit_layers:
-            key = f"dit_layer{layer_idx}"
-            if key in pos_acts:
-                storage.save_activations_incremental(
-                    "dit", layer_idx, "pos",
-                    pos_acts[key][np.newaxis, ...],
-                    pos_meta,
-                )
-            if key in neg_acts:
-                storage.save_activations_incremental(
-                    "dit", layer_idx, "neg",
-                    neg_acts[key][np.newaxis, ...],
-                    neg_meta,
-                )
+        if save_dit_layers:
+            logger.debug(f"  保存DiT激活...")
+            for layer_idx in save_dit_layers:
+                key = f"dit_layer{layer_idx}"
+                logger.debug(f"    处理 layer{layer_idx}, key={key}")
+
+                if key in pos_acts:
+                    try:
+                        data = pos_acts[key][np.newaxis, ...]
+                        storage.save_activations_incremental(
+                            "dit", layer_idx, "pos", data, pos_meta,
+                        )
+                        logger.debug(f"      正样本DiT保存完成")
+                    except Exception as e:
+                        logger.error(f"保存DiT正样本失败 (layer{layer_idx}): {e}")
+                        raise
+
+                if key in neg_acts:
+                    try:
+                        data = neg_acts[key][np.newaxis, ...]
+                        storage.save_activations_incremental(
+                            "dit", layer_idx, "neg", data, neg_meta,
+                        )
+                        logger.debug(f"      负样本DiT保存完成")
+                    except Exception as e:
+                        logger.error(f"保存DiT负样本失败 (layer{layer_idx}): {e}")
+                        raise
 
         # 更新断点
+        logger.debug(f"  更新断点...")
         completed_pairs.add(pair_idx)
         for layer_idx in sae_layers:
-            ckpt = ExtractionCheckpoint(
-                completed_pair_indices=sorted(list(completed_pairs)),
-                total_pairs=num_pairs,
-            )
-            storage.save_checkpoint(layer_idx, "pos", ckpt)
-            storage.save_checkpoint(layer_idx, "neg", ckpt)
+            try:
+                ckpt = ExtractionCheckpoint(
+                    completed_pair_indices=sorted(list(completed_pairs)),
+                    total_pairs=num_pairs,
+                )
+                storage.save_checkpoint(layer_idx, "pos", ckpt)
+                storage.save_checkpoint(layer_idx, "neg", ckpt)
+                logger.debug(f"    layer{layer_idx} 断点更新完成: {len(completed_pairs)}/{num_pairs}")
+            except Exception as e:
+                logger.error(f"更新断点失败 (layer{layer_idx}): {e}")
+                logger.error(f"详细错误:", exc_info=True)
+                raise
+
+        logger.info(f"[{pair_idx+1}/{num_pairs}] pair {pair_idx} 完成")
 
         # 显存状态
         if torch.cuda.is_available() and (pair_idx + 1) % 10 == 0:
             allocated = torch.cuda.memory_allocated(device) / 1024**3
-            logger.info(f"  显存使用: {allocated:.2f} GB")
+            reserved = torch.cuda.memory_reserved(device) / 1024**3
+            logger.info(f"  显存使用: {allocated:.2f} GB (预留: {reserved:.2f} GB)")
+            logger.debug(f"    当前已完成: {pair_idx+1}/{num_pairs}")
 
     logger.info("=" * 60)
     logger.info("阶段一完成！")
