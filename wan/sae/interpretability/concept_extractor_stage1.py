@@ -307,9 +307,10 @@ class PairedActivationCollector:
 
         cfg = t2v_1_3B
         logger.debug(f"  使用配置: t2v_1_3B")
-        logger.debug(f"    base_dim={cfg.base_dim}")
-        logger.debug(f"    num_blocks={len(cfg.blocks)}")
-        logger.debug(f"    dit_model_dim={cfg.dit_model_dim}")
+        logger.debug(f"    dim={cfg.dim}")
+        logger.debug(f"    num_layers={cfg.num_layers}")
+        logger.debug(f"    num_heads={cfg.num_heads}")
+        logger.debug(f"    ffn_dim={cfg.ffn_dim}")
 
         try:
             self.wrapper = WanT2V(
