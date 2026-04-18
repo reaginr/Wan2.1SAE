@@ -704,9 +704,10 @@ class PairedActivationCollector:
                                 z_np = z.cpu().numpy()  # [L, d_hidden]
                             else:
                                 # 只调用encode（更快）
-                                z, info = sae.encode(h_2d)  # [L, d_hidden]
+                                z, topk_idx, topk_val = sae.encode(h_2d)  # [L, d_hidden]
                                 logger.debug(f"        SAE编码完成: z形状={z.shape}")
-                                logger.debug(f"          sparsity={info.get('sparsity', 'N/A') if info else 'N/A'}")
+                                if topk_idx is not None:
+                                    logger.debug(f"          topk_idx形状={topk_idx.shape}")
                                 z_np = z.cpu().numpy()  # [L, d_hidden]
                                 logger.debug(f"        转换为numpy: 形状={z_np.shape}")
                         except Exception as e:
