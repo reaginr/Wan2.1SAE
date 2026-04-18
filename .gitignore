@@ -10,6 +10,7 @@
 *.mkv
 *.log
 *.zip
+*.pt
 ckpt/sae_runs/**/sae_step*.pt # 仅忽略包含 "step" 的 ckpt 文件
 !ckpt/sae_runs/**/sae_latest.pt # 保留 sae_latest.pt 文件
 *.pth
