@@ -133,7 +133,7 @@ concept_params = {
 
     # sae_layers: 要采集的SAE层（用SAE编码）
     # 格式: "15,29" 表示第15层和第29层
-    "sae_layers": "15,29",
+    "sae_layers": "15",
 
     # save_dit_layers: 要保存的DiT原始层（可选）
     # 格式: "15" 或 "15,29"，空字符串表示不保存
@@ -152,7 +152,7 @@ concept_params = {
 sampling_params = {
     # sampling_steps: 采样步数（时间步数）
     # Flow Matching通常30-50步
-    "sampling_steps": 30,
+    "sampling_steps": 50,
 
     # use_cfg: 是否使用Classifier-Free Guidance
     # True = 运行两次前向（条件+无条件），False = 只运行一次
