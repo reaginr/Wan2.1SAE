@@ -101,6 +101,16 @@ from wan.sae.interpretability.activation_io import ActivationIO, SampleMetadata,
 
 logger = logging.getLogger(__name__)
 
+# 注册信号处理器，捕获异常退出
+def signal_handler(signum, frame):
+    sig_name = {2: 'SIGINT', 9: 'SIGKILL', 15: 'SIGTERM'}.get(signum, f'SIG{signum}')
+    logger.critical(f"收到信号 {sig_name}({signum})，程序即将退出")
+    raise SystemExit(1)
+
+import signal
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 
 ##########################################################################################
 # 参数配置（复用sae_train_t2v_1_3b.py的设计：代码内配置 + 命令行覆盖）
@@ -590,16 +600,49 @@ class PairedActivationCollector:
                 logger.debug(f"      seq_len: {self.seq_len}")
                 logger.debug(f"      amp dtype: {self.cfg.param_dtype}")
 
+                # 检查参数合理性
+                if self.seq_len > 10000:
+                    logger.warning(f"      seq_len={self.seq_len} 过大，可能导致OOM或卡死")
+                    logger.warning(f"      检查latent_shape={self.latent_shape}是否正确")
+                if len(context) == 0 or context[0].dim() != 2:
+                    logger.error(f"      context格式错误: len={len(context)}, shape={[c.shape for c in context]}")
+                    raise ValueError("context格式错误")
+
                 with torch.no_grad(), amp.autocast(dtype=self.cfg.param_dtype):
                     # 条件分支
                     logger.debug(f"      运行条件分支...")
                     try:
-                        noise_pred_cond = self.model(
+                        # 同步CUDA，确保之前的操作完成
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+
+                        noise_pred_output = self.model(
                             latents, t=t_tensor, context=context, seq_len=self.seq_len
                         )
-                        logger.debug(f"      条件分支完成: 输出数量={len(noise_pred_cond)}")
-                        logger.debug(f"        输出形状: {[p.shape for p in noise_pred_cond]}")
-                        logger.debug(f"        输出范围: [{noise_pred_cond[0].min():.3f}, {noise_pred_cond[0].max():.3f}]")
+
+                        # 同步CUDA，检查错误
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+
+                        # model返回列表，取第一个元素（与原始代码一致）[0]
+                        if isinstance(noise_pred_output, list) and len(noise_pred_output) > 0:
+                            noise_pred_cond = noise_pred_output[0]
+                        else:
+                            noise_pred_cond = noise_pred_output
+
+                        logger.debug(f"      条件分支完成")
+                        logger.debug(f"        输出类型: {type(noise_pred_cond).__name__}")
+                        if hasattr(noise_pred_cond, 'shape'):
+                            logger.debug(f"        输出形状: {noise_pred_cond.shape}")
+                            logger.debug(f"        输出范围: [{noise_pred_cond.min():.3f}, {noise_pred_cond.max():.3f}]")
+                    except RuntimeError as e:
+                        logger.error(f"CUDA/Runtime错误: {e}")
+                        if "out of memory" in str(e).lower():
+                            logger.error("CUDA OOM！尝试减少batch_size或sampling_steps")
+                            if torch.cuda.is_available():
+                                logger.error(f"显存状态: {torch.cuda.memory_allocated()/1024**3:.2f}GB / {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f}GB")
+                        logger.error(f"详细错误:", exc_info=True)
+                        raise
                     except Exception as e:
                         logger.error(f"条件分支失败: {e}")
                         logger.error(f"详细错误:", exc_info=True)
