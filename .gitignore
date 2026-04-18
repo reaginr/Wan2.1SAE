@@ -10,8 +10,9 @@
 *.mkv
 *.log
 *.zip
-*.pt        # 忽略所有 .pt 模型文件
-!latest.pt  # 例外：唯独 latest.pt 不忽略，允许上传
+*.pt
+ckpt/sae_runs/**/*step*.pt # 仅忽略包含 "step" 的 ckpt 文件
+!ckpt/sae_runs/**/sae_latest.pt # 保留 sae_latest.pt 文件
 *.pth
 *.ckpt
 *.safetensors
