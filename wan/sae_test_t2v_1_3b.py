@@ -388,6 +388,14 @@ def main():
     model.eval().requires_grad_(False).to(device)
     logger.info("WanT2V 已加载到 %s", device)
 
+    # 打印显存信息
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated(device) / 1024**3
+        reserved = torch.cuda.memory_reserved(device) / 1024**3
+        total = torch.cuda.get_device_properties(device).total_memory / 1024**3
+        logger.info("GPU 显存: 已分配 %.2f GB / 已预留 %.2f GB / 总计 %.2f GB", allocated, reserved, total)
+        logger.info("可用显存: %.2f GB", total - allocated)
+
     # 计算 latent 形状
     vae_z_dim = wrapper.vae.model.z_dim
     latent_shape = compute_latent_shape(cfg, (args.size_w, args.size_h), args.frame_num, vae_z_dim)
@@ -488,6 +496,12 @@ def main():
         B = len(batch)
         batch_count += 1
 
+        # 打印显存状态（用于诊断 OOM）
+        if torch.cuda.is_available() and batch_count % 5 == 0:
+            allocated = torch.cuda.memory_allocated(device) / 1024**3
+            reserved = torch.cuda.memory_reserved(device) / 1024**3
+            logger.debug("批次 [%d/%d] 显存: 已分配 %.2f GB, 已预留 %.2f GB", batch_count, total_batches, allocated, reserved)
+
         logger.info("处理批次 [%d/%d], 大小=%d", batch_count, total_batches, B)
 
         try:
@@ -496,13 +510,21 @@ def main():
             wrapper.text_encoder.model.to(device)
             context = wrapper.text_encoder(batch, device)
             logger.debug("  文本编码完成, context.shape=%s", context.shape if hasattr(context, 'shape') else 'N/A')
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            if "out of memory" in error_msg:
+                logger.error("=" * 60)
+                logger.error("批次 [%d/%d] CUDA OOM: 文本编码失败", batch_count, total_batches)
+                logger.error("提示词数量: %d, 总长度: %d chars", len(batch), sum(len(p) for p in batch))
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated(device) / 1024**3
+                    logger.error("当前显存使用: %.2f GB", allocated)
+                logger.error("建议: 减小 batch_prompts 或缩短提示词")
+                logger.error("=" * 60)
+            raise RuntimeError(f"批次 {batch_count} 文本编码失败 (OOM): {e}") from e
         except Exception as e:
             logger.error("批次 [%d/%d] 文本编码失败: %s", batch_count, total_batches, e)
             raise RuntimeError(f"批次 {batch_count} 文本编码失败: {e}") from e
-
-        # 随机时间步和噪声 latent（单步前向）
-        t = torch.randint(low=0, high=cfg.num_train_timesteps, size=(B,), device=device, dtype=torch.long)
-        x_list = [torch.randn(*latent_shape, device=device, dtype=torch.float32) for _ in range(B)]
 
         # 随机时间步和噪声 latent（单步前向）
         try:
@@ -510,6 +532,19 @@ def main():
             t = torch.randint(low=0, high=cfg.num_train_timesteps, size=(B,), device=device, dtype=torch.long)
             x_list = [torch.randn(*latent_shape, device=device, dtype=torch.float32) for _ in range(B)]
             logger.debug("  噪声 latent 准备完成, len=%d, shape=%s", len(x_list), latent_shape)
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            if "out of memory" in error_msg:
+                logger.error("=" * 60)
+                logger.error("批次 [%d/%d] CUDA OOM: 创建噪声 latent 失败", batch_count, total_batches)
+                logger.error("=" * 60)
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated(device) / 1024**3
+                    reserved = torch.cuda.memory_reserved(device) / 1024**3
+                    logger.error("当前显存: 已分配 %.2f GB, 已预留 %.2f GB", allocated, reserved)
+                logger.error("建议: 减小 batch_prompts 或生成尺寸 (当前 latent_shape=%s)", latent_shape)
+                logger.error("=" * 60)
+            raise RuntimeError(f"批次 {batch_count} 准备噪声 latent 失败 (OOM): {e}") from e
         except Exception as e:
             logger.error("批次 [%d/%d] 准备噪声 latent 失败: %s", batch_count, total_batches, e)
             raise RuntimeError(f"批次 {batch_count} 准备噪声 latent 失败: {e}") from e
@@ -529,6 +564,24 @@ def main():
             with torch.no_grad(), amp.autocast(dtype=cfg.param_dtype):
                 _ = model(x_list, t=t, context=context, seq_len=seq_len)
             logger.debug("  DiT forward 完成, 收集到 %d 个激活", len(raw))
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            if "out of memory" in error_msg or "cuda" in error_msg:
+                logger.error("=" * 60)
+                logger.error("批次 [%d/%d] CUDA OOM: DiT forward 失败", batch_count, total_batches)
+                logger.error("=" * 60)
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated(device) / 1024**3
+                    reserved = torch.cuda.memory_reserved(device) / 1024**3
+                    total = torch.cuda.get_device_properties(device).total_memory / 1024**3
+                    logger.error("显存使用: %.2f GB / %.2f GB (%.1f%%)", allocated, total, 100*allocated/total)
+                logger.error("建议解决方案:")
+                logger.error("  1. 减小 batch_prompts (当前: %d)", args.batch_prompts)
+                logger.error("  2. 减小生成尺寸: --size_w 512 --size_h 288")
+                logger.error("  3. 减少帧数: --frame_num 17")
+                logger.error("  4. 减少 hook 层数")
+                logger.error("=" * 60)
+            raise RuntimeError(f"批次 {batch_count} DiT forward 失败 (可能是OOM): {e}") from e
         except Exception as e:
             logger.error("批次 [%d/%d] DiT forward 失败: %s", batch_count, total_batches, e)
             raise RuntimeError(f"批次 {batch_count} DiT forward 失败: {e}") from e
@@ -689,6 +742,60 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         logger.info("用户中断")
+        sys.exit(1)
+    except RuntimeError as e:
+        error_msg = str(e).lower()
+        # 检测 CUDA OOM
+        if "out of memory" in error_msg or "cuda" in error_msg and "memory" in error_msg:
+            logger.error("=" * 60)
+            logger.error("CUDA 显存不足 (OOM)")
+            logger.error("=" * 60)
+            logger.error("建议解决方案:")
+            logger.error("1. 减小 batch_prompts (当前: 查看配置)")
+            logger.error("2. 减小生成尺寸 (size_w x size_h)")
+            logger.error("3. 减少 frame_num (帧数)")
+            logger.error("4. 使用 --offload_model True 卸载模型到 CPU")
+            logger.error("5. 关闭其他占用显存的程序")
+            logger.error("=" * 60)
+            # 尝试打印显存信息
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    for i in range(torch.cuda.device_count()):
+                        allocated = torch.cuda.memory_allocated(i) / 1024**3
+                        reserved = torch.cuda.memory_reserved(i) / 1024**3
+                        logger.error(f"GPU {i}: 已分配 {allocated:.2f} GB, 已预留 {reserved:.2f} GB")
+            except Exception:
+                pass
+        else:
+            logger.error("=" * 60)
+            logger.error("RuntimeError: %s", e)
+            logger.error("=" * 60)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    except MemoryError as e:
+        logger.error("=" * 60)
+        logger.error("系统内存不足 (RAM OOM)")
+        logger.error("=" * 60)
+        logger.error("建议解决方案:")
+        logger.error("1. 减少 max_prompts (测试提示词数量)")
+        logger.error("2. 减小 batch_prompts (批处理大小)")
+        logger.error("3. 关闭其他占用内存的程序")
+        logger.error("4. 增加系统 SWAP 空间")
+        logger.error("=" * 60)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    except FileNotFoundError as e:
+        logger.error("=" * 60)
+        logger.error("文件不存在: %s", e)
+        logger.error("=" * 60)
+        logger.error("请检查以下路径是否正确:")
+        logger.error("  - model_path (Wan2.1 模型目录)")
+        logger.error("  - prompt_dir (提示词目录)")
+        logger.error("  - run_dir (SAE checkpoint 目录)")
+        logger.error("=" * 60)
         sys.exit(1)
     except Exception as e:
         logger.error("=" * 60)

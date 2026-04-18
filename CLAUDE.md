@@ -418,7 +418,7 @@ sae_runs/exp1/
 
 ## 文档
 
-- `README.md`: 原始 Wan2.1 文档（英文）
-- `README-CN.md`: 中文版本文档
+- `README-EN.md`: 原始 Wan2.1 文档（英文）
+- `README.md`: 中文版本文档
 - `sae_readme.md`: 详细的 SAE 系统文档（中文）
 - 各 SAE 脚本内的参数注释: 最详细的参数说明

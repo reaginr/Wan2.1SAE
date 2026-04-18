@@ -287,6 +287,50 @@ class SAELogManager:
         for f in self._csv_files.values():
             f.close()
 
+    def log_shape(self, name: str, tensor_or_shape, dtype: Optional[str] = None):
+        """
+        记录张量形状（用于调试数据流）
+
+        参数:
+            name: 变量名
+            tensor_or_shape: torch.Tensor, numpy.ndarray 或 shape tuple
+            dtype: 数据类型（可选）
+        """
+        try:
+            import torch
+            import numpy as np
+
+            if isinstance(tensor_or_shape, torch.Tensor):
+                shape = tuple(tensor_or_shape.shape)
+                dtype = dtype or str(tensor_or_shape.dtype).split('.')[-1]
+                device = str(tensor_or_shape.device)
+                msg = f"[SHAPE] {name}: {shape}, dtype={dtype}, device={device}"
+            elif isinstance(tensor_or_shape, np.ndarray):
+                shape = tensor_or_shape.shape
+                dtype = dtype or str(tensor_or_shape.dtype)
+                msg = f"[SHAPE] {name}: {shape}, dtype={dtype}, numpy"
+            elif hasattr(tensor_or_shape, '__iter__'):
+                shape = tuple(tensor_or_shape)
+                dtype_str = f", dtype={dtype}" if dtype else ""
+                msg = f"[SHAPE] {name}: {shape}{dtype_str}"
+            else:
+                msg = f"[SHAPE] {name}: {tensor_or_shape}"
+
+            self.logger.debug(msg)
+        except Exception:
+            # 调试日志不应影响主流程
+            self.logger.debug(f"[SHAPE] {name}: {tensor_or_shape}")
+
+    def log_dataflow(self, step: str, details: Dict[str, Any]):
+        """
+        记录数据流步骤（用于调试复杂转换）
+
+        参数:
+            step: 步骤名称
+            details: 详细信息字典
+        """
+        self.logger.debug(f"[DATAFLOW] {step} | " + " | ".join(f"{k}={v}" for k, v in details.items()))
+
 
 # 便捷函数
 def get_train_logger(run_dir: str, hook_mode: str, layer_idx: int) -> SAELogManager:

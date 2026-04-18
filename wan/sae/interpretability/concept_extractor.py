@@ -221,17 +221,23 @@ class ConceptVector:
 def load_prompts(file_path: str) -> List[str]:
     """从文件加载提示词（每行一条）"""
     path = Path(file_path)
+    logger.debug(f"[LOAD] 开始加载提示词文件: {path}")
+
     if not path.exists():
+        logger.error(f"[LOAD] 提示词文件不存在: {path}")
         raise FileNotFoundError(f"提示词文件不存在: {path}")
 
     prompts = []
+    line_count = 0
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
+            line_count += 1
             line = line.strip()
             if line and not line.startswith("#"):
                 prompts.append(line)
 
-    logger.info(f"从 {path} 加载了 {len(prompts)} 条提示词")
+    logger.info(f"从 {path} 加载了 {len(prompts)}/{line_count} 条有效提示词")
+    logger.debug(f"[LOAD] 前3条示例: {prompts[:3] if prompts else 'N/A'}")
     return prompts
 
 
@@ -239,19 +245,57 @@ def compute_sae_activations(
     sae: SparseAutoEncoder,
     activations: np.ndarray,  # [T, L, C]
     device: torch.device,
-) -> np.ndarray:
+    return_per_prompt: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
     计算SAE激活值
 
-    返回: [d_hidden] 平均激活
+    参数:
+        sae: SAE模型
+        activations: 输入激活 [T, L, C] 或 [B, T, L, C]
+        device: 计算设备
+        return_per_prompt: 是否返回每个提示词的激活（用于热力图）
+
+    返回:
+        默认: [d_hidden] 平均激活
+        return_per_prompt=True: (z_mean, z_per_prompt)
+            - z_mean: [d_hidden] 平均激活
+            - z_per_prompt: [T, d_hidden] 每个提示词的激活
     """
-    T, L, C = activations.shape
-    x = torch.from_numpy(activations.reshape(-1, C)).float().to(device)
+    # 处理输入维度
+    if activations.ndim == 3:
+        T, L, C = activations.shape
+        B = 1
+        activations = activations.reshape(B, T, L, C)
+    elif activations.ndim == 4:
+        B, T, L, C = activations.shape
+    else:
+        raise ValueError(f"Unsupported activation shape: {activations.shape}")
 
-    with torch.no_grad():
-        z, _, _ = sae.encode(x)  # [N, d_hidden]
-        z_mean = z.mean(dim=0).cpu().numpy()  # [d_hidden]
+    logger.debug(f"[COMPUTE] 输入激活: shape=[{B}, {T}, {L}, {C}], dtype={activations.dtype}")
 
+    # 每个提示词单独编码
+    z_per_prompt = []
+    for i in range(T):
+        # 提取第i个提示词的激活 [B, L, C] -> [B*L, C]
+        x = torch.from_numpy(activations[:, i, :, :].reshape(-1, C)).float().to(device)
+
+        with torch.no_grad():
+            z, _, _ = sae.encode(x)  # [B*L, d_hidden]
+            # 平均池化到 [d_hidden]
+            z_mean_i = z.mean(dim=0).cpu().numpy()
+            z_per_prompt.append(z_mean_i)
+
+    # 转换为数组 [T, d_hidden]
+    z_per_prompt = np.stack(z_per_prompt, axis=0)
+    # 计算总体平均 [d_hidden]
+    z_mean = z_per_prompt.mean(axis=0)
+
+    logger.debug(f"[COMPUTE] SAE编码后: z_per_prompt.shape={z_per_prompt.shape}, sparsity={(z_per_prompt != 0).mean():.4f}")
+    logger.debug(f"[COMPUTE] 平均激活: shape={z_mean.shape}, mean={z_mean.mean():.6f}, max={z_mean.max():.6f}")
+
+    if return_per_prompt:
+        return z_mean, z_per_prompt
     return z_mean
 
 
@@ -263,41 +307,74 @@ def extract_concept_vector_mean_diff(
     use_abs: bool = False,
     normalize: bool = True,
     min_threshold: float = 0.01,
+    save_per_prompt: bool = False,
+    output_dir: Optional[str] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     使用平均差分法提取概念向量
 
     concept_vector = mean(positive_activations) - mean(negative_activations)
+
+    参数:
+        save_per_prompt: 是否保存每个提示词的激活值
+        output_dir: 保存目录（当save_per_prompt=True时必需）
     """
+    logger.debug(f"[EXTRACT] mean_diff 开始: 正例={len(positive_activations)}, 负例={len(negative_activations)}, use_abs={use_abs}, normalize={normalize}, save_per_prompt={save_per_prompt}")
+
     # 计算正例平均激活
+    logger.debug(f"[EXTRACT] 计算正例平均激活...")
     pos_activations = []
-    for act in positive_activations:
-        z_mean = compute_sae_activations(sae, act, device)
+    pos_per_prompt_list = []  # 保存每个提示词的激活
+    for i, act in enumerate(positive_activations):
+        if save_per_prompt:
+            z_mean, z_per = compute_sae_activations(sae, act, device, return_per_prompt=True)
+            pos_per_prompt_list.append(z_per)
+        else:
+            z_mean = compute_sae_activations(sae, act, device)
         if use_abs:
             z_mean = np.abs(z_mean)
+            if save_per_prompt:
+                pos_per_prompt_list[-1] = np.abs(pos_per_prompt_list[-1])
         pos_activations.append(z_mean)
+        logger.debug(f"[EXTRACT] 正例[{i}]: mean={z_mean.mean():.6f}, max={z_mean.max():.6f}")
     pos_mean = np.mean(pos_activations, axis=0)
+    logger.debug(f"[EXTRACT] 正例平均: shape={pos_mean.shape}, mean={pos_mean.mean():.6f}, std={pos_mean.std():.6f}")
 
     # 计算负例平均激活
+    logger.debug(f"[EXTRACT] 计算负例平均激活...")
     neg_activations = []
-    for act in negative_activations:
-        z_mean = compute_sae_activations(sae, act, device)
+    neg_per_prompt_list = []  # 保存每个提示词的激活
+    for i, act in enumerate(negative_activations):
+        if save_per_prompt:
+            z_mean, z_per = compute_sae_activations(sae, act, device, return_per_prompt=True)
+            neg_per_prompt_list.append(z_per)
+        else:
+            z_mean = compute_sae_activations(sae, act, device)
         if use_abs:
             z_mean = np.abs(z_mean)
+            if save_per_prompt:
+                neg_per_prompt_list[-1] = np.abs(neg_per_prompt_list[-1])
         neg_activations.append(z_mean)
+        logger.debug(f"[EXTRACT] 负例[{i}]: mean={z_mean.mean():.6f}, max={z_mean.max():.6f}")
     neg_mean = np.mean(neg_activations, axis=0)
+    logger.debug(f"[EXTRACT] 负例平均: shape={neg_mean.shape}, mean={neg_mean.mean():.6f}, std={neg_mean.std():.6f}")
 
     # 计算差分
     concept_vector = pos_mean - neg_mean
+    logger.debug(f"[EXTRACT] 差分向量: shape={concept_vector.shape}, mean={concept_vector.mean():.6f}, std={concept_vector.std():.6f}")
 
     # 应用阈值
+    active_count_before = np.sum(concept_vector != 0)
     concept_vector[np.abs(concept_vector) < min_threshold] = 0
+    active_count_after = np.sum(concept_vector != 0)
+    logger.debug(f"[EXTRACT] 阈值过滤: threshold={min_threshold}, {active_count_before}->{active_count_after} 活跃特征")
 
     # 归一化
     if normalize:
         norm = np.linalg.norm(concept_vector)
         if norm > 0:
             concept_vector = concept_vector / norm
+            logger.debug(f"[EXTRACT] 归一化: 原范数={norm:.6f}, 新范数={np.linalg.norm(concept_vector):.6f}")
 
     statistics = {
         "pos_mean_activation": pos_mean,
@@ -307,6 +384,37 @@ def extract_concept_vector_mean_diff(
         "neg_std": np.std(neg_activations, axis=0),
     }
 
+    # 保存每个提示词的激活值（用于热力图分析）
+    if save_per_prompt and output_dir:
+        logger.debug(f"[EXTRACT] 保存每个提示词的激活值到 {output_dir}...")
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # 合并所有正例的 per-prompt 激活 [N_pos, d_hidden]
+        if pos_per_prompt_list:
+            pos_per_prompt = np.concatenate(pos_per_prompt_list, axis=0)  # [N_pos, d_hidden]
+            neg_per_prompt = np.concatenate(neg_per_prompt_list, axis=0)  # [N_neg, d_hidden]
+
+            # 保存为 .npz 文件（numpy压缩格式）
+            per_prompt_path = output_path / "per_prompt_activations.npz"
+            np.savez(
+                per_prompt_path,
+                pos_activations=pos_per_prompt,
+                neg_activations=neg_per_prompt,
+                pos_mean=pos_mean,
+                neg_mean=neg_mean,
+                concept_vector=concept_vector,
+            )
+            logger.info(f"Per-prompt activations saved: {per_prompt_path}")
+            logger.debug(f"[EXTRACT] 正例激活矩阵: {pos_per_prompt.shape}, 负例激活矩阵: {neg_per_prompt.shape}")
+
+            # 添加到统计信息
+            statistics["pos_per_prompt"] = pos_per_prompt
+            statistics["neg_per_prompt"] = neg_per_prompt
+        else:
+            logger.warning("[EXTRACT] pos_per_prompt_list is empty, nothing to save")
+
+    logger.debug(f"[EXTRACT] mean_diff 完成: 输出shape={concept_vector.shape}")
     return concept_vector, statistics
 
 
@@ -438,6 +546,8 @@ def extract_concept_for_layer(
     extraction_config: Dict[str, Any],
     stats_config: Dict[str, Any],
     device: torch.device,
+    save_per_prompt: bool = False,
+    per_prompt_output_dir: Optional[str] = None,
 ) -> ConceptVector:
     """
     为单层提取概念向量
@@ -447,24 +557,34 @@ def extract_concept_for_layer(
     logger.info(f"正例: {len(positive_activations)}, 负例: {len(negative_activations)}")
     logger.info(f"=" * 60)
 
+    # 记录激活数据形状
+    if positive_activations:
+        logger.debug(f"[LAYER] 正例激活[0] shape: {positive_activations[0].shape}, dtype: {positive_activations[0].dtype}")
+    if negative_activations:
+        logger.debug(f"[LAYER] 负例激活[0] shape: {negative_activations[0].shape}, dtype: {negative_activations[0].dtype}")
+
     # 解析层信息
     hook_mode, layer_str = layer_key.split(".")
     layer_idx = int(layer_str.replace("layer", ""))
+    logger.debug(f"[LAYER] 解析层: hook_mode={hook_mode}, layer_idx={layer_idx}")
 
     # 加载SAE（使用新的统一 IO 接口，自动兼容新旧格式）
     loc = SAERunLocator(run_dir=run_dir, hook_mode=hook_mode, layer_idx=layer_idx)
+    logger.debug(f"[LAYER] SAE路径: {loc.latest_ckpt_path()}")
 
     try:
         io = SAECheckpointIO.load(loc, device=device, strict=True, allow_legacy=True)
         sae = io.sae
         sae_cfg = io.sae_config
+        logger.debug(f"[LAYER] SAE配置来源: {getattr(io, '_config_source', 'checkpoint')}")
         if io._config_source == "json_fallback":
             logger.warning("从旧格式 .json 加载配置 [建议迁移]")
     except Exception as e:
         logger.error(f"加载SAE失败: {e}")
         raise
 
-    logger.info(f"已加载SAE: d_model={sae_cfg.d_model}, d_hidden={sae_cfg.d_hidden}")
+    logger.info(f"已加载SAE: d_model={sae_cfg.d_model}, d_hidden={sae_cfg.d_hidden}, sparsity={sae_cfg.sparsity}")
+    logger.debug(f"[LAYER] SAE完整配置: {sae_cfg.to_dict()}")
 
     # 选择提取方法
     method = extraction_config["method"]
@@ -475,6 +595,8 @@ def extract_concept_for_layer(
             use_abs=extraction_config["use_abs"],
             normalize=extraction_config["normalize"],
             min_threshold=extraction_config["min_activation_threshold"],
+            save_per_prompt=save_per_prompt,
+            output_dir=per_prompt_output_dir,
         )
     elif method == "contrastive":
         concept_vector, statistics = extract_concept_vector_contrastive(
@@ -499,13 +621,16 @@ def extract_concept_for_layer(
 
     # 计算选择度
     if stats_config["compute_selectivity"]:
+        logger.debug(f"[LAYER] 计算特征选择度... threshold={stats_config['selectivity_threshold']}")
         selectivity_stats = compute_feature_selectivity(
             concept_vector, positive_activations, negative_activations,
             sae, device, threshold=stats_config["selectivity_threshold"]
         )
         statistics["selectivity"] = selectivity_stats
+        logger.debug(f"[LAYER] 选择度统计: high_selectivity_count={selectivity_stats.get('high_selectivity_count', 'N/A')}")
 
     # 创建概念向量对象
+    logger.debug(f"[LAYER] 创建ConceptVector对象...")
     concept = ConceptVector(
         name=concept_name,
         vector=concept_vector,
