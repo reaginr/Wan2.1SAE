@@ -161,8 +161,8 @@ concept_params = {
 # 原因：Euler稳定无状态问题，与Hook机制兼容；CFG可提升特征质量
 sampling_params = {
     # sampling_steps: 采样步数（时间步数）
-    # Flow Matching通常30-50步
-    "sampling_steps": 50,
+    # 必须与SAE训练时一致（训练代码默认为30）
+    "sampling_steps": 30,
 
     # use_cfg: 是否使用Classifier-Free Guidance
     # True = 运行两次前向（条件+无条件），False = 只运行一次
@@ -608,7 +608,7 @@ class PairedActivationCollector:
                     logger.error(f"      context格式错误: len={len(context)}, shape={[c.shape for c in context]}")
                     raise ValueError("context格式错误")
 
-                with torch.no_grad(), amp.autocast(dtype=self.cfg.param_dtype):
+                with torch.no_grad(), torch.amp.autocast(device_type="cuda", dtype=self.cfg.param_dtype):
                     # 条件分支
                     logger.debug(f"      运行条件分支...")
                     try:
