@@ -163,12 +163,16 @@ class ConceptExtractor:
         """
         加载并池化一批激活值
 
+        支持两种数据格式:
+        - 实时池化格式: [N, 7, D] (7个统计量: mean, std, max, min, median, p95, p05)
+        - 旧格式: [N, T, L, D] (全时间步数据)
+
         Args:
             polarity: "pos" 或 "neg"
             batch_indices: 批次样本索引
 
         Returns:
-            [B, D] 池化后的特征，或None
+            [B, D] 池化后的特征（使用mean统计量），或None
         """
         # 加载激活值（使用内存映射）
         acts = self.io.load_activations(
@@ -179,13 +183,29 @@ class ConceptExtractor:
         if acts is None:
             return None
 
-        # 提取指定批次 [B, T, L, D]
+        # 提取指定批次
         batch_acts = acts[batch_indices]
 
-        # 池化：在时间和token维度上取平均 [B, D]
-        # acts: [B, T, L, D] -> [B, D]
-        B = batch_acts.shape[0]
-        pooled = batch_acts.reshape(B, -1, batch_acts.shape[-1]).mean(axis=1)
+        # 判断数据格式并处理
+        if batch_acts.ndim == 3 and batch_acts.shape[1] == 7:
+            # 实时池化格式: [B, 7, D]
+            # 7个统计量: [mean, std, max, min, median, p95, p05]
+            # 第0维是mean (已经在阶段一计算好)
+            logger.debug(f"检测到实时池化格式: {batch_acts.shape}, 使用第0维(mean)")
+            pooled = batch_acts[:, 0, :]  # [B, D] 取mean
+
+        elif batch_acts.ndim == 4:
+            # 旧格式: [B, T, L, D] (全时间步)
+            # 需要在线池化
+            logger.debug(f"检测到全时间步格式: {batch_acts.shape}, 在线计算mean")
+            B = batch_acts.shape[0]
+            pooled = batch_acts.reshape(B, -1, batch_acts.shape[-1]).mean(axis=1)
+
+        else:
+            raise ValueError(
+                f"未知的数据格式: ndim={batch_acts.ndim}, shape={batch_acts.shape}\n"
+                f"期望: [N, 7, D] (池化格式) 或 [N, T, L, D] (全时间步)"
+            )
 
         return pooled
 
@@ -201,6 +221,8 @@ class ConceptExtractor:
         logger.info("=" * 60)
         logger.info(f"开始提取概念向量: {self.category} / {self.layer_type}_layer{self.layer_idx}")
         logger.info(f"方法: {self.method}")
+        logger.info(f"特征统计量: mean (第0维)")
+        logger.info(f"特征维度: 6144 (SAE d_hidden)")
         logger.info(f"归一化: {self.normalize}, 阈值: {self.min_threshold}")
         logger.info("=" * 60)
 
@@ -395,11 +417,23 @@ def main():
 
     # 检查配置
     config = io.load_config()
+    activation_format = None
     if config:
         logger.info("阶段一配置:")
         logger.info(f"  时间步数: {config.get('num_timesteps', 'N/A')}")
         logger.info(f"  CFG: {config.get('use_cfg', 'N/A')}")
         logger.info(f"  采样方法: {config.get('sampling_method', 'N/A')}")
+
+        # 读取数据格式信息
+        activation_format = config.get("activation_format", {})
+        pool_activations = config.get("pool_activations", False)
+
+        if pool_activations and activation_format:
+            logger.info(f"  数据格式: {activation_format.get('shape', 'N/A')}")
+            logger.info(f"  说明: {activation_format.get('description', 'N/A')}")
+            logger.info(f"  阶段二将使用: {activation_format.get('note', '第0维(mean)')}")
+        elif not pool_activations:
+            logger.warning(f"  数据格式: 全时间步 [N, T, L, D] - 内存占用大")
 
     # 检查数据是否存在
     num_pos = io.get_num_samples(layer_type, layer_idx, args.category, "pos")
@@ -460,6 +494,8 @@ def main():
             "activation_root": args.activation_root,
             "num_pos": num_pos,
             "num_neg": num_neg,
+            "activation_format": activation_format or "unknown",
+            "stat_used": "mean",  # 明确标注使用的是mean统计量
         },
         "extraction_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }

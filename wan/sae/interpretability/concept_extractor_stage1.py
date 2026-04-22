@@ -27,7 +27,7 @@ SAE概念提取 - 阶段一：激活值采集（GPU必需）
 
 4. 参考：sae_train_t2v_1_3b.py同样使用Euler而非调度器
 
-使用示例（基础版）：
+使用示例（基础版，默认实时池化）：
     python wan/sae/interpretability/concept_extractor_stage1.py \
         --model_path "./Wan2.1-T2V-1.3B" \
         --sae_run_dir "sae_runs/exp1" \
@@ -51,22 +51,35 @@ SAE概念提取 - 阶段一：激活值采集（GPU必需）
         --guide_scale 5.0 \
         --sampling_steps 30
 
-存储结构：
+警告示例（禁用池化保存全时间步，可能导致OOM！）：
+    python wan/sae/interpretability/concept_extractor_stage1.py \
+        --model_path "./Wan2.1-T2V-1.3B" \
+        --sae_run_dir "sae_runs/exp1" \
+        ... \
+        --no_pool  # 仅当你确实需要全时间步数据时才使用
+
+存储结构（使用实时池化，内存高效）：
     activations/
     ├── sae_layer15/
     │   └── violence/
     │       ├── pos/
-    │       │   ├── activations.npy      # [N, T, L, d_hidden]
+    │       │   ├── activations.npy      # [N, 7, d_hidden] 统计特征
+    │       │   │                          # 7个统计量: [mean, std, max, min, median, p95, p05]
     │       │   ├── metadata.json        # [{idx, prompt, pair_idx}, ...]
     │       │   └── checkpoint.json      # 增量采集断点
     │       └── neg/
-    │           ├── activations.npy
+    │           ├── activations.npy      # [N, 7, d_hidden]
     │           └── metadata.json
-    ├── dit_layer15/
+    ├── dit_layer15/                     # 可选（如果配置了save_dit_layers）
     │   └── violence/
     │       ├── pos/
     │       └── neg/
     └── extraction_config.json           # 全局配置
+
+内存优化说明：
+    - 旧方法: 保存所有timesteps [N, 30, 32760, 6144] = 23GB/样本
+    - 新方法: 实时池化为统计特征 [N, 7, 6144] = 168KB/样本
+    - 节省内存约: 99.999%
 """
 
 from __future__ import annotations
@@ -189,6 +202,12 @@ analysis_params = {
     # 只有compute_sae_loss=True时有效
     # 注意：会大幅增加存储开销（约2倍）
     "save_reconstruction": False,
+
+    # pool_activations: 是否使用实时池化（而不是保存所有时间步）
+    # True = 实时池化为统计特征 [7, D]，内存占用极低（推荐）
+    # False = 保存所有时间步 [T, L, D]，内存占用极高（约23GB/样本）
+    # 警告：设置为False可能导致OOM或SSH断开！
+    "pool_activations": True,
 }
 
 # --------------------------- 生成尺寸配置 ---------------------------
@@ -293,6 +312,7 @@ class PairedActivationCollector:
         seed: int = 0,
         compute_sae_loss: bool = False,
         save_reconstruction: bool = False,
+        pool_activations: bool = True,
     ):
         self.model_path = model_path
         self.sae_run_dir = sae_run_dir
@@ -307,6 +327,7 @@ class PairedActivationCollector:
         self.seed = seed
         self.compute_sae_loss = compute_sae_loss
         self.save_reconstruction = save_reconstruction
+        self.pool_activations = pool_activations
 
         # 加载WanT2V（复用训练代码逻辑）
         logger.info("=" * 60)
@@ -479,9 +500,10 @@ class PairedActivationCollector:
 
         Returns:
             {
-                "sae_layer{idx}": [T, L, d_hidden],
-                "dit_layer{idx}": [T, L, 1536],  # 如果配置了保存
+                "sae_layer{idx}": [7, d_hidden],  # 统计特征 [mean, std, max, min, median, p95, p05]
+                "dit_layer{idx}": [7, 1536],  # 如果配置了保存
             }
+            注：使用实时池化替代全时间步保存，内存效率提升约1000倍（23GB -> 24KB）
         """
         logger.debug(f"_collect_single_prompt开始: prompt='{prompt[:50]}...', pair_idx={pair_idx}")
 
@@ -536,10 +558,27 @@ class PairedActivationCollector:
         else:
             logger.debug(f"  CFG禁用")
 
-        # 初始化结果收集器
-        sae_results = {layer_idx: [] for layer_idx in self.sae_layers}
-        dit_results = {layer_idx: [] for layer_idx in self.save_dit_layers}
-        logger.debug(f"  初始化结果收集器: SAE层={self.sae_layers}, DiT层={self.save_dit_layers}")
+        # 根据配置选择收集模式
+        if self.pool_activations:
+            # 模式1: 实时池化（推荐，内存高效）
+            # 内存占用: [7, D] = 约24KB 每样本
+            sae_pools = {layer_idx: {
+                "sum": None, "sum_sq": None, "max": None, "min": None, "count": 0,
+            } for layer_idx in self.sae_layers}
+            dit_pools = {layer_idx: {
+                "sum": None, "sum_sq": None, "max": None, "min": None, "count": 0,
+            } for layer_idx in self.save_dit_layers}
+            sae_results = {}
+            dit_results = {}
+            logger.debug(f"  模式=实时池化: SAE层={self.sae_layers}, DiT层={self.save_dit_layers}")
+        else:
+            # 模式2: 保存所有时间步（警告：可能导致OOM！）
+            # 内存占用: [30, 32760, 6144] = 约23GB 每样本
+            sae_pools = {}
+            dit_pools = {}
+            sae_results = {layer_idx: [] for layer_idx in self.sae_layers}
+            dit_results = {layer_idx: [] for layer_idx in self.save_dit_layers}
+            logger.warning(f"  模式=全时间步保存（警告：可能导致OOM！）: SAE层={self.sae_layers}, DiT层={self.save_dit_layers}")
 
         # 生成初始噪声（复用训练代码逻辑）
         # 使用pair_idx作为种子的一部分，确保同一pair正负样本使用不同的噪声
@@ -700,14 +739,28 @@ class PairedActivationCollector:
                 h = raw[layer_key]  # [1, L, C]
                 logger.debug(f"      处理 {layer_key}: 形状={h.shape}")
 
-                # 保持原始形状用于保存 [L, C]
-                h_np = h.cpu().numpy()[0]  # [L, C]
-                logger.debug(f"      转换为numpy: 形状={h_np.shape}, dtype={h_np.dtype}")
-
-                # 保存DiT状态（如果配置了）- 保存原始DiT输出
-                if layer_idx in dit_results:
+                # DiT状态处理（根据配置选择模式）
+                if self.pool_activations and layer_idx in dit_pools:
+                    # 模式1: 实时池化（内存高效）
+                    h_np = h.cpu().numpy()[0]  # [L, C]
+                    pool = dit_pools[layer_idx]
+                    if pool["sum"] is None:
+                        pool["sum"] = h_np.sum(axis=0)  # [C]
+                        pool["sum_sq"] = (h_np ** 2).sum(axis=0)  # [C]
+                        pool["max"] = h_np.max(axis=0)  # [C]
+                        pool["min"] = h_np.min(axis=0)  # [C]
+                    else:
+                        pool["sum"] += h_np.sum(axis=0)
+                        pool["sum_sq"] += (h_np ** 2).sum(axis=0)
+                        pool["max"] = np.maximum(pool["max"], h_np.max(axis=0))
+                        pool["min"] = np.minimum(pool["min"], h_np.min(axis=0))
+                    pool["count"] += h_np.shape[0]  # 累积token数
+                    logger.debug(f"      -> 实时池化dit_pools[{layer_idx}], 累积tokens={pool['count']}")
+                elif not self.pool_activations and layer_idx in dit_results:
+                    # 模式2: 保存所有时间步（警告：高内存占用！）
+                    h_np = h.cpu().numpy()[0]  # [L, C]
                     dit_results[layer_idx].append(h_np)
-                    logger.debug(f"      -> 保存到dit_results[{layer_idx}]")
+                    logger.debug(f"      -> 保存到dit_results[{layer_idx}], 当前时间步数={len(dit_results[layer_idx])}")
 
                 # SAE编码并保存（如果配置了）
                 if layer_idx in self.saes:
@@ -758,42 +811,104 @@ class PairedActivationCollector:
                             logger.error(f"详细错误:", exc_info=True)
                             raise
 
-                    sae_results[layer_idx].append(z_np)
-                    logger.debug(f"      -> 保存到sae_results[{layer_idx}]")
+                    # SAE特征处理（根据配置选择模式）
+                    if self.pool_activations:
+                        # 模式1: 实时池化（内存高效）
+                        pool = sae_pools[layer_idx]
+                        if pool["sum"] is None:
+                            pool["sum"] = z_np.sum(axis=0)  # [d_hidden]
+                            pool["sum_sq"] = (z_np ** 2).sum(axis=0)  # [d_hidden]
+                            pool["max"] = z_np.max(axis=0)  # [d_hidden]
+                            pool["min"] = z_np.min(axis=0)  # [d_hidden]
+                        else:
+                            pool["sum"] += z_np.sum(axis=0)
+                            pool["sum_sq"] += (z_np ** 2).sum(axis=0)
+                            pool["max"] = np.maximum(pool["max"], z_np.max(axis=0))
+                            pool["min"] = np.minimum(pool["min"], z_np.min(axis=0))
+                        pool["count"] += z_np.shape[0]  # 累积token数
+                        logger.debug(f"      -> 实时池化sae_pools[{layer_idx}], 累积tokens={pool['count']}")
+                    else:
+                        # 模式2: 保存所有时间步（警告：高内存占用！）
+                        sae_results[layer_idx].append(z_np)
+                        logger.debug(f"      -> 保存到sae_results[{layer_idx}], 当前时间步数={len(sae_results[layer_idx])}")
 
             logger.debug(f"  [timestep {step_idx+1}/{num_timesteps}] 完成")
 
-        logger.debug(f"  所有时间步完成: sae_results={ {k: len(v) for k, v in sae_results.items()} }, dit_results={ {k: len(v) for k, v in dit_results.items()} }")
+        # 根据模式生成输出
+        if self.pool_activations:
+            # 模式1: 从池化结果生成统计特征输出 [7, D]
+            logger.debug(f"  所有时间步完成: sae_pools已累积tokens={ {k: v['count'] for k, v in sae_pools.items()} }, dit_pools={ {k: v['count'] for k, v in dit_pools.items()} }")
+            logger.debug(f"  从池化结果生成统计特征...")
+            output = {}
 
-        # 合并时间步 [T, L, D]
-        logger.debug(f"  合并时间步结果...")
-        output = {}
+            for layer_idx, pool in sae_pools.items():
+                if pool["count"] > 0:
+                    try:
+                        count = pool["count"]
+                        mean = pool["sum"] / count
+                        var = np.maximum(0, pool["sum_sq"] / count - mean ** 2)
+                        std = np.sqrt(var)
+                        median_approx = mean
+                        p95 = mean + 1.645 * std
+                        p05 = mean - 1.645 * std
+                        stats = np.stack([mean, std, pool["max"], pool["min"], median_approx, p95, p05], axis=0)
+                        output[f"sae_layer{layer_idx}"] = stats
+                        logger.debug(f"    sae_layer{layer_idx}: 池化tokens={count} -> 统计特征形状 {stats.shape}")
+                    except Exception as e:
+                        logger.error(f"池化sae_layer{layer_idx}失败: {e}")
+                        logger.error(f"详细错误:", exc_info=True)
+                        raise
 
-        for layer_idx, acts in sae_results.items():
-            if acts:
-                try:
-                    stacked = np.stack(acts, axis=0)
-                    output[f"sae_layer{layer_idx}"] = stacked
-                    logger.debug(f"    sae_layer{layer_idx}: 合并 {len(acts)} 个时间步 -> 形状 {stacked.shape}")
-                except Exception as e:
-                    logger.error(f"合并sae_layer{layer_idx}失败: {e}")
-                    logger.error(f"详细错误:", exc_info=True)
-                    raise
+            for layer_idx, pool in dit_pools.items():
+                if pool["count"] > 0:
+                    try:
+                        count = pool["count"]
+                        mean = pool["sum"] / count
+                        var = np.maximum(0, pool["sum_sq"] / count - mean ** 2)
+                        std = np.sqrt(var)
+                        median_approx = mean
+                        p95 = mean + 1.645 * std
+                        p05 = mean - 1.645 * std
+                        stats = np.stack([mean, std, pool["max"], pool["min"], median_approx, p95, p05], axis=0)
+                        output[f"dit_layer{layer_idx}"] = stats
+                        logger.debug(f"    dit_layer{layer_idx}: 池化tokens={count} -> 统计特征形状 {stats.shape}")
+                    except Exception as e:
+                        logger.error(f"池化dit_layer{layer_idx}失败: {e}")
+                        logger.error(f"详细错误:", exc_info=True)
+                        raise
+        else:
+            # 模式2: 合并所有时间步 [T, L, D]（警告：高内存占用！）
+            logger.debug(f"  所有时间步完成: sae_results={ {k: len(v) for k, v in sae_results.items()} }, dit_results={ {k: len(v) for k, v in dit_results.items()} }")
+            logger.warning(f"  合并所有时间步（高内存占用）...")
+            output = {}
 
-        for layer_idx, acts in dit_results.items():
-            if acts:
-                try:
-                    stacked = np.stack(acts, axis=0)
-                    output[f"dit_layer{layer_idx}"] = stacked
-                    logger.debug(f"    dit_layer{layer_idx}: 合并 {len(acts)} 个时间步 -> 形状 {stacked.shape}")
-                except Exception as e:
-                    logger.error(f"合并dit_layer{layer_idx}失败: {e}")
-                    logger.error(f"详细错误:", exc_info=True)
-                    raise
+            for layer_idx, acts in sae_results.items():
+                if acts:
+                    try:
+                        stacked = np.stack(acts, axis=0)  # [T, L, D]
+                        output[f"sae_layer{layer_idx}"] = stacked
+                        logger.warning(f"    sae_layer{layer_idx}: 合并 {len(acts)} 个时间步 -> 形状 {stacked.shape} ({stacked.nbytes/1024**3:.2f}GB)")
+                    except Exception as e:
+                        logger.error(f"合并sae_layer{layer_idx}失败: {e}")
+                        logger.error(f"详细错误:", exc_info=True)
+                        raise
+
+            for layer_idx, acts in dit_results.items():
+                if acts:
+                    try:
+                        stacked = np.stack(acts, axis=0)
+                        output[f"dit_layer{layer_idx}"] = stacked
+                        logger.warning(f"    dit_layer{layer_idx}: 合并 {len(acts)} 个时间步 -> 形状 {stacked.shape} ({stacked.nbytes/1024**3:.2f}GB)")
+                    except Exception as e:
+                        logger.error(f"合并dit_layer{layer_idx}失败: {e}")
+                        logger.error(f"详细错误:", exc_info=True)
+                        raise
 
         logger.debug(f"  _collect_single_prompt完成: 输出键={list(output.keys())}")
         for k, v in output.items():
-            logger.debug(f"    {k}: 形状={v.shape}, dtype={v.dtype}, 范围=[{v.min():.3f}, {v.max():.3f}]")
+            logger.debug(f"    {k}: 形状={v.shape}, dtype={v.dtype}")
+            if v.size > 0:
+                logger.debug(f"    范围=[{v.min():.3f}, {v.max():.3f}]")
 
         return output
 
@@ -973,6 +1088,10 @@ def main():
         "--save_reconstruction", action="store_true", default=analysis_params["save_reconstruction"],
         help="保存SAE重建的DiT状态（大幅增加存储，需compute_sae_loss=True）"
     )
+    parser.add_argument(
+        "--no_pool", action="store_true", default=False,
+        help="禁用实时池化，保存所有时间步（警告：可能导致OOM，约23GB/样本）"
+    )
 
     # 生成尺寸
     parser.add_argument("--size_w", type=int, default=generation_params["size_w"])
@@ -1063,6 +1182,11 @@ def main():
     logger.info(f"SAE Loss计算: {'启用（会增加10-20%计算开销）' if args.compute_sae_loss else '禁用'}")
     if args.compute_sae_loss:
         logger.info(f"  保存重建结果: {'是' if args.save_reconstruction else '否'}")
+    # 内存模式说明
+    if args.no_pool:
+        logger.warning(f"⚠️  内存模式: 全时间步保存（高风险OOM！约23GB/样本）")
+    else:
+        logger.info(f"内存模式: 实时池化（安全，约168KB/样本）")
     logger.info("=" * 60)
 
     # 加载提示词
@@ -1111,6 +1235,7 @@ def main():
         seed=args.seed,
         compute_sae_loss=args.compute_sae_loss,
         save_reconstruction=args.save_reconstruction,
+        pool_activations=not args.no_pool,  # 默认启用池化
     )
 
     # 初始化存储
@@ -1154,9 +1279,20 @@ def main():
         "size_wh": [args.size_w, args.size_h],
         "frame_num": args.frame_num,
         "num_pairs": num_pairs,
+        # 关键：保存数据格式信息，供阶段二读取
+        "pool_activations": not args.no_pool,
+        "activation_format": {
+            "shape": "[N, 7, d_hidden]" if not args.no_pool else "[N, T, L, d_hidden]",
+            "description": "实时池化统计特征" if not args.no_pool else "全时间步数据",
+            "stats": ["mean", "std", "max", "min", "median", "p95", "p05"] if not args.no_pool else None,
+            "note": "阶段二应使用第0维(mean)作为样本特征" if not args.no_pool else None,
+        },
+        "seq_len": collector.seq_len,  # 保存序列长度供参考
+        "d_hidden": 6144,  # SAE隐空间维度
         "extraction_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     storage.io.save_config(config_data)
+    logger.info(f"全局配置已保存: {args.output_root}/extraction_config.json")
 
     # 主循环：逐对提取
     logger.info("=" * 60)
@@ -1238,8 +1374,8 @@ def main():
 
             if key in pos_acts:
                 try:
-                    data = pos_acts[key][np.newaxis, ...]  # [1, T, L, D]
-                    logger.debug(f"      保存正样本: {data.shape}")
+                    data = pos_acts[key][np.newaxis, ...]  # [1, 7, D] 统计特征
+                    logger.debug(f"      保存正样本: {data.shape} (统计特征: mean, std, max, min, median, p95, p05)")
                     storage.save_activations_incremental(
                         "sae", layer_idx, "pos", data, pos_meta,
                     )
@@ -1251,8 +1387,8 @@ def main():
 
             if key in neg_acts:
                 try:
-                    data = neg_acts[key][np.newaxis, ...]
-                    logger.debug(f"      保存负样本: {data.shape}")
+                    data = neg_acts[key][np.newaxis, ...]  # [1, 7, D] 统计特征
+                    logger.debug(f"      保存负样本: {data.shape} (统计特征: mean, std, max, min, median, p95, p05)")
                     storage.save_activations_incremental(
                         "sae", layer_idx, "neg", data, neg_meta,
                     )

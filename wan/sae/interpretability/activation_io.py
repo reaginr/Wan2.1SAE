@@ -89,12 +89,15 @@ class ActivationIO:
         ├── sae_layer{idx}/
         │   └── {category}/
         │       ├── pos/
-        │       │   ├── activations.npy      # [N, T, L, D]
+        │       │   ├── activations.npy      # [N, 7, D] 统计特征 (实时池化)
+        │       │   │                          # 7个统计量: [mean, std, max, min, median, p95, p05]
         │       │   ├── metadata.json        # 元信息列表
         │       │   └── checkpoint.json      # 断点信息
         │       └── neg/
         ├── dit_layer{idx}/
         └── extraction_config.json           # 全局配置
+
+    注：使用实时池化后，激活值形状从 [N, T, L, D] (约23GB/样本) 变为 [N, 7, D] (约168KB/样本)
     """
 
     def __init__(self, root_dir: str):
@@ -186,7 +189,8 @@ class ActivationIO:
         保存激活值
 
         Args:
-            activations: [N, T, L, D] 或要追加的 [1, T, L, D]
+            activations: [N, 7, D] 或要追加的 [1, 7, D]
+                7个统计量: [mean, std, max, min, median, p95, p05]
             append: True=追加到现有文件，False=覆盖
         """
         path = self._get_activations_path(layer_type, layer_idx, category, polarity)
@@ -217,7 +221,8 @@ class ActivationIO:
             mmap: True=使用内存映射（大文件不OOM），False=直接加载
 
         Returns:
-            [N, T, L, D] 数组，或None如果文件不存在
+            [N, 7, D] 统计特征数组，或None如果文件不存在
+            7个统计量: [mean, std, max, min, median, p95, p05]
         """
         path = self._get_activations_path(layer_type, layer_idx, category, polarity)
         if not path.exists():

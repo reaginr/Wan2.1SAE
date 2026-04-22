@@ -1,3 +1,5 @@
+# final_cleaned中的文件夹，neg_prompt_1(not nsfw)和pos_prompt_1(nsfw)
+
 # SAE（稀疏自编码器）结构详解
 
 本文档详细介绍 Wan2.1 项目中 SAE 的代码实现结构，包括网络架构、损失函数和稀疏化策略。
