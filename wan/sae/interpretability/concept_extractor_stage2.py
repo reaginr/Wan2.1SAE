@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -42,7 +43,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# 将项目根目录添加到 sys.path（支持从任意位置运行）
+# 当前文件: wan/sae/interpretability/concept_extractor_stage2.py
+# 需要回退4层到项目根目录
+_PROJECT_ROOT = str(Path(__file__).parent.parent.parent.parent)
+sys.path.insert(0, _PROJECT_ROOT)
+if os.environ.get('DEBUG'):
+    print(f"[DEBUG] 项目根目录: {_PROJECT_ROOT}", file=sys.stderr)
 
 from wan.sae.interpretability.activation_io import ActivationIO, SampleMetadata
 

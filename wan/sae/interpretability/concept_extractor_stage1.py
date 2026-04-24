@@ -99,8 +99,14 @@ import numpy as np
 import torch
 import torch.cuda.amp as amp
 
-# 复用训练代码的路径处理
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 将项目根目录添加到 sys.path（支持从任意位置运行）
+# 当前文件: wan/sae/interpretability/concept_extractor_stage1.py
+# 需要回退4层到项目根目录
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, _PROJECT_ROOT)
+if os.environ.get('DEBUG'):
+    print(f"[DEBUG] 项目根目录: {_PROJECT_ROOT}", file=sys.stderr)
+    print(f"[DEBUG] sys.path[0]: {sys.path[0]}", file=sys.stderr)
 
 from wan.configs.wan_t2v_1_3B import t2v_1_3B
 from wan.modules.sae_new import SparseAutoEncoder
