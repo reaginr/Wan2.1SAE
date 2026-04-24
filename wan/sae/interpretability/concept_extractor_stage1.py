@@ -1300,6 +1300,10 @@ def main():
     logger.info("=" * 60)
     logger.debug(f"总对数: {num_pairs}, 已完成: {len(completed_pairs)}")
 
+    # 初始化计时器（用于ETA计算）
+    loop_start_time = time.time()
+    processed_count = 0
+
     for pair_idx in range(num_pairs):
         logger.debug(f"\n[主循环] pair_idx={pair_idx}")
 
@@ -1445,6 +1449,27 @@ def main():
                 raise
 
         logger.info(f"[{pair_idx+1}/{num_pairs}] pair {pair_idx} 完成")
+
+        # 计算ETA
+        processed_count += 1
+        elapsed_total = time.time() - loop_start_time
+        avg_time_per_pair = elapsed_total / processed_count
+        remaining_pairs = num_pairs - len(completed_pairs)
+        eta_seconds = avg_time_per_pair * remaining_pairs
+
+        # 格式化时间
+        def format_time(seconds):
+            if seconds < 60:
+                return f"{seconds:.0f}s"
+            elif seconds < 3600:
+                return f"{seconds/60:.1f}m"
+            else:
+                return f"{seconds/3600:.1f}h"
+
+        logger.info(f"  进度: {pair_idx+1}/{num_pairs} | "
+                   f"耗时: {format_time(elapsed_total)} | "
+                   f"每对: {avg_time_per_pair:.1f}s | "
+                   f"ETA: {format_time(eta_seconds)}")
 
         # 显存状态
         if torch.cuda.is_available() and (pair_idx + 1) % 10 == 0:

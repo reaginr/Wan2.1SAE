@@ -241,6 +241,7 @@ class ConceptExtractor:
 
         # 处理正样本
         logger.info("处理正样本...")
+        pos_start_time = time.time()
         for i in range(0, num_pos, self.batch_size):
             end_idx = min(i + self.batch_size, num_pos)
             batch_indices = list(range(i, end_idx))
@@ -249,11 +250,20 @@ class ConceptExtractor:
             if pooled is not None:
                 pos_stats.update(pooled)
 
-            if (i // self.batch_size + 1) % 10 == 0:
-                logger.info(f"  已处理 {end_idx}/{num_pos}")
+            # 每10个batch或最后一批显示进度和ETA
+            batch_num = i // self.batch_size + 1
+            total_batches = (num_pos + self.batch_size - 1) // self.batch_size
+            if batch_num % 10 == 0 or end_idx == num_pos:
+                elapsed = time.time() - pos_start_time
+                progress = end_idx / num_pos
+                if progress > 0:
+                    eta = elapsed / progress - elapsed
+                    logger.info(f"  已处理 {end_idx}/{num_pos} ({progress*100:.1f}%) | "
+                               f"耗时: {elapsed:.1f}s | ETA: {eta:.1f}s")
 
         # 处理负样本
         logger.info("处理负样本...")
+        neg_start_time = time.time()
         for i in range(0, num_neg, self.batch_size):
             end_idx = min(i + self.batch_size, num_neg)
             batch_indices = list(range(i, end_idx))
@@ -262,8 +272,16 @@ class ConceptExtractor:
             if pooled is not None:
                 neg_stats.update(pooled)
 
-            if (i // self.batch_size + 1) % 10 == 0:
-                logger.info(f"  已处理 {end_idx}/{num_neg}")
+            # 每10个batch或最后一批显示进度和ETA
+            batch_num = i // self.batch_size + 1
+            total_batches = (num_neg + self.batch_size - 1) // self.batch_size
+            if batch_num % 10 == 0 or end_idx == num_neg:
+                elapsed = time.time() - neg_start_time
+                progress = end_idx / num_neg
+                if progress > 0:
+                    eta = elapsed / progress - elapsed
+                    logger.info(f"  已处理 {end_idx}/{num_neg} ({progress*100:.1f}%) | "
+                               f"耗时: {elapsed:.1f}s | ETA: {eta:.1f}s")
 
         # 计算概念向量
         pos_mean = pos_stats.get_mean()
