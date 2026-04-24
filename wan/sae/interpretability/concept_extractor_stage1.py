@@ -617,6 +617,9 @@ class PairedActivationCollector:
         num_timesteps = len(timesteps)
         logger.debug(f"  开始遍历 {num_timesteps} 个时间步")
 
+        # 警告标志，确保某些警告只输出一次
+        warned_large_seq_len = False
+
         for step_idx, t_val in enumerate(timesteps):
             logger.debug(f"  [timestep {step_idx+1}/{num_timesteps}] t={t_val}")
             t_tensor = torch.tensor([t_val], device=self.device, dtype=torch.long)
@@ -645,10 +648,11 @@ class PairedActivationCollector:
                 logger.debug(f"      seq_len: {self.seq_len}")
                 logger.debug(f"      amp dtype: {self.cfg.param_dtype}")
 
-                # 检查参数合理性
-                if self.seq_len > 10000:
-                    logger.warning(f"      seq_len={self.seq_len} 过大，可能导致OOM或卡死")
-                    logger.warning(f"      检查latent_shape={self.latent_shape}是否正确")
+                # 检查参数合理性（只警告一次）
+                if self.seq_len > 10000 and not warned_large_seq_len:
+                    logger.warning(f"      seq_len={self.seq_len} 较大，注意内存使用")
+                    logger.warning(f"      latent_shape={self.latent_shape} (batch, T/4+1, H/8, W/8)")
+                    warned_large_seq_len = True
                 if len(context) == 0 or context[0].dim() != 2:
                     logger.error(f"      context格式错误: len={len(context)}, shape={[c.shape for c in context]}")
                     raise ValueError("context格式错误")
