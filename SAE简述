@@ -1,7 +1,0 @@
- SAE 建议 hook 位置（最通用）：
-
-    选一层 k：
-    hook_fn(module, input, output) 里：
-    x = input[0]，形状 [B, L, 1536]；
-    你可以 x.reshape(-1, 1536) 收集；
-    或在分析阶段：x_flat -> SAE -> z，只读不改。

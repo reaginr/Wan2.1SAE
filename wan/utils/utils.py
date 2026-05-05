@@ -44,7 +44,7 @@ def cache_video(tensor,
                 for u in tensor.unbind(2)
             ],
                                  dim=1).permute(1, 2, 3, 0)
-            tensor = (tensor * 255).type(torch.uint8).cpu()
+            tensor = (tensor * 255).to(torch.float32).clamp(0, 255).to(torch.uint8).cpu()
 
             # write video
             writer = imageio.get_writer(

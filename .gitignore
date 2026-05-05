@@ -10,6 +10,8 @@
 *.mkv
 *.log
 *.zip
+*.md
+*.txt
 # 全局忽略所有pt权重文件
 *.pt
 # 【例外1】只放行这个目录下的 sae_latest.pt（你唯一要上传的pt）
@@ -45,3 +47,13 @@ nsfw_detect/
 wan/safree/
 未来计划.txt
 saferee简述.md
+当前文生视频模型防御方法简述.txt
+claude tips.txt
+!README.md
+!sae_readme.md
+visualize_patch_structure.py
+verify_pooling_equivalence.py
+train_sae.py
+毕业设计/
+中期汇报
+activations/
