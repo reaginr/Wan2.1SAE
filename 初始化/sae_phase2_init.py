@@ -534,9 +534,26 @@ class SAEInitializer:
         返回:
             directions: [D, n_components] 主方向 (单位范数)
             explained_variance: [n_components] 解释方差
+
+        注意:
+            - 最大成分数 = min(N, D) = min(256000, 1536) = 1536
+            - 1536 个 PCA 方向 × expansion 倍 = d_hidden
+            - 对于 8x: 1536 × 8 = 12288 ✓
+            - 对于 16x: 1536 × 16 = 24576 ✓
         """
-        # 计算需要的成分数 (等于扩展倍数对应的维度)
-        n_components = min(x.shape[0], x.shape[1], self.config.expansion_factor * 1536 // self.config.expansion_factor)
+        N, D = x.shape
+
+        # 最大可能的成分数 = min(N, D)
+        # 对于我们的数据: min(256000, 1536) = 1536
+        max_components = min(N, D)
+
+        # 我们需要提取所有 D 个主方向
+        n_components = max_components
+
+        if self.verbose:
+            print(f"  PCA: 输入 [{N}, {D}], 提取 {n_components} 个主方向")
+            print(f"  扩展倍数: {self.config.expansion_factor}x")
+            print(f"  目标 d_hidden: {self.config.expansion_factor * D}")
 
         # 使用 torch.pca_lowrank
         U, S, V = torch.pca_lowrank(x.float(), q=n_components, center=False)
@@ -545,25 +562,38 @@ class SAEInitializer:
         directions = V  # 已经是单位范数
 
         # 解释方差
-        explained_variance = (S ** 2) / (x.shape[0] - 1)
+        explained_variance = (S ** 2) / (N - 1)
+
+        # 计算累计解释方差比例
+        total_variance = explained_variance.sum()
+        cumulative_ratio = explained_variance.cumsum(0) / total_variance
+
+        # 找到解释 90%, 95%, 99% 方差需要的成分数
+        if self.verbose:
+            for ratio in [0.90, 0.95, 0.99]:
+                n_needed = (cumulative_ratio < ratio).sum().item() + 1
+                print(f"  解释 {ratio*100:.0f}% 方差需要 {n_needed} 个成分")
 
         return directions, explained_variance
 
     def _overcomplete_expansion(
         self,
         pca_directions: torch.Tensor,
+        x_centered: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Overcomplete扩展
 
         将PCA方向扩展到高维隐藏空间:
-        - 8x扩展: 每个PCA方向扩展8份
-        - 每份加入小扰动
+        - 8x扩展: 每个 PCA 方向扩展 8 份 (1536 × 8 = 12288)
+        - 16x扩展: 每个 PCA 方向扩展 16 份 (1536 × 16 = 24576)
+        - 每份加入小扰动，扰动强度递增
         - 扰动后单位范数归一化
         - 打乱排列防止同源方向连续
 
         参数:
             pca_directions: [D, n_pca] PCA主方向
+            x_centered: [N, D] 中心化后的数据 (用于自适应初始化，可选)
 
         返回:
             Wdec: [D, d_hidden] 解码器权重
@@ -578,36 +608,78 @@ class SAEInitializer:
         # 每个PCA方向需要扩展的份数
         n_pca = pca_directions.shape[1]
 
+        # 验证: PCA方向数量 = d_model = 1536
+        if n_pca != d_model:
+            self.logger.warning(
+                f"PCA 方向数量 ({n_pca}) != d_model ({d_model})，"
+                f"可能影响扩展质量"
+            ) if hasattr(self, 'logger') else None
+
         # 创建扩展后的权重
         Wdec_list = []
 
         for i in range(n_pca):
             direction = pca_directions[:, i]  # [D]
 
-            # 创建expansion份带扰动的副本
+            # 创建 expansion 份带扰动的副本
+            # 策略: 扰动强度递增，从接近原方向到逐渐偏离
             for j in range(expansion):
-                # 添加扰动
-                perturbation = torch.randn_like(direction) * config.perturbation_std
+                # 扰动强度: 随着副本索引增加而略微增加
+                # 第一个副本接近原方向，最后一个副本偏离更多
+                scale = config.perturbation_std * (1.0 + 0.5 * j / expansion)
+                perturbation = torch.randn_like(direction) * scale
                 expanded = direction + perturbation
 
-                # 归一化
+                # 归一化到单位范数
                 expanded = F.normalize(expanded, dim=0)
 
                 Wdec_list.append(expanded)
 
-        # 打乱顺序
+        # 打乱顺序 (防止同源方向连续，促进特征多样性)
         perm = torch.randperm(len(Wdec_list))
-        Wdec = torch.stack([Wdec_list[i] for i in perm], dim=1)  # [D, d_hidden]
+        Wdec = torch.stack([Wdec_list[i] for i in perm], dim=1)  # [D, n_pca * expansion]
 
-        # 如果维度不够，用随机向量填充
-        if Wdec.shape[1] < d_hidden:
-            n_fill = d_hidden - Wdec.shape[1]
-            random_directions = torch.randn(d_model, n_fill)
-            random_directions = F.normalize(random_directions, dim=0)
-            Wdec = torch.cat([Wdec, random_directions], dim=1)
+        # 验证维度
+        expected_dim = n_pca * expansion
+        if expected_dim != d_hidden:
+            # 这意味着 expansion_factor 设置与预期不符
+            # 需要调整
+            if expected_dim < d_hidden:
+                # 维度不够: 使用 PCA 残差方向填充
+                n_fill = d_hidden - expected_dim
 
-        # 截断到目标维度
-        Wdec = Wdec[:, :d_hidden]
+                if self.verbose:
+                    print(f"  需要填充 {n_fill} 个额外方向...")
+
+                # 策略: 使用 PCA 方向的线性组合 + 大扰动
+                # 这比纯随机更有意义
+                fill_list = []
+                for k in range(n_fill):
+                    # 随机选择几个 PCA 方向进行组合
+                    n_combine = min(3, n_pca)
+                    indices = torch.randperm(n_pca)[:n_combine]
+                    combined = torch.zeros(d_model)
+                    for idx in indices:
+                        weight = torch.randn(1)
+                        combined = combined + weight * pca_directions[:, idx]
+
+                    # 加入较大扰动
+                    combined = combined + torch.randn(d_model) * config.perturbation_std * 2
+                    combined = F.normalize(combined, dim=0)
+                    fill_list.append(combined)
+
+                fill_directions = torch.stack(fill_list, dim=1)
+                Wdec = torch.cat([Wdec, fill_directions], dim=1)
+
+                if self.verbose:
+                    print(f"  填充完成: {Wdec.shape}")
+            else:
+                # 维度过多: 截断
+                Wdec = Wdec[:, :d_hidden]
+
+        # 最终校验
+        assert Wdec.shape == (d_model, d_hidden), \
+            f"Wdec 形状错误: {Wdec.shape}, 期望 ({d_model}, {d_hidden})"
 
         return Wdec
 

@@ -57,3 +57,5 @@ train_sae.py
 毕业设计/
 中期汇报/
 !diverse_500.txt
+generate_*.py
+run_jailbreak*
