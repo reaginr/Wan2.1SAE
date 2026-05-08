@@ -137,8 +137,9 @@ class ActivationCollector:
 
         # 缓存
         self._prompt_cache: Dict[str, torch.Tensor] = {}
+        # 使用 hook 返回的 key 格式: "block_out.layer{idx}"
         self._activation_cache: Dict[str, List[torch.Tensor]] = {
-            f"layer{layer}": [] for layer in config.hook_layers
+            f"block_out.layer{layer}": [] for layer in config.hook_layers
         }
 
         # 统计
@@ -223,8 +224,14 @@ class ActivationCollector:
         """
         context_list = []
 
-        # 移动 T5 到 GPU
-        if not self.text_encoder.model.device.type == "cuda":
+        # 检查 T5 模型是否在 GPU 上，如果不是则移动
+        # 使用参数的设备来判断
+        try:
+            t5_device = next(self.text_encoder.model.parameters()).device
+            if t5_device.type != "cuda":
+                self.text_encoder.model.to(self.device)
+        except (StopIteration, AttributeError):
+            # 如果模型没有参数，直接尝试移动
             self.text_encoder.model.to(self.device)
 
         # 批量编码
@@ -303,8 +310,8 @@ class ActivationCollector:
 
         参数:
             latent: 噪声 latent [B, 16, T, H, W]
-            context: 文本 embedding
-            timestep: 扩散时间步
+            context: 文本 embedding [L, D]
+            timestep: 扩散时间步 (0-1 范围)
 
         返回:
             activations: {layer_key: tensor [B, L, D]}
@@ -326,31 +333,49 @@ class ActivationCollector:
         )
 
         # 准备 DiT 输入
+        # WanModel.forward 期望:
+        #   x: List[Tensor], 每个 tensor 形状 [C_in, F, H, W]
+        #   context: List[Tensor], 每个 tensor 形状 [L, D]
+        #   t: Tensor shape [B]
+
+        # latent: [B, 16, T, H, W] -> list of [16, T, H, W]
+        if latent.dim() == 5:
+            latent_list = [latent[0]]  # 取 batch 中的第一个
+        else:
+            latent_list = [latent]
+
+        # context: [L, D] -> list of [L, D]
+        if isinstance(context, torch.Tensor):
+            context_list = [context]
+        else:
+            context_list = context
+
+        # seq_len 计算
+        # T, H, W from latent shape
+        _, C, T, H, W = latent.shape
         seq_len = math.ceil(
-            (latent.shape[3] * latent.shape[4]) /
-            (self.patch_size[1] * self.patch_size[2]) *
-            latent.shape[2]
+            (H * W) / (self.patch_size[1] * self.patch_size[2]) * T
         )
 
-        # Timestep 转换
-        t_tensor = torch.tensor([int(timestep * self.num_train_timesteps)],
-                                 device=self.device, dtype=torch.long)
+        # Timestep 转换: float 0-1 -> int 0-999
+        t_int = int(timestep * (self.num_train_timesteps - 1))
+        t_tensor = torch.tensor([t_int], device=self.device, dtype=torch.long)
 
         # 执行单次 forward
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=self.dtype):
-            try:
+        try:
+            with torch.no_grad(), torch.cuda.amp.autocast(dtype=self.dtype):
                 _ = self.model(
-                    latent,
+                    latent_list,
                     t=t_tensor,
-                    context=[context],
+                    context=context_list,
                     seq_len=seq_len,
                 )
-            except Exception as e:
-                self.logger.error(f"Forward 失败: {e}")
-                raise
-
-        # 移除 hooks
-        remove_hooks(handles)
+        except Exception as e:
+            self.logger.error(f"Forward 失败: {e}")
+            raise
+        finally:
+            # 移除 hooks (无论成功失败都要移除)
+            remove_hooks(handles)
 
         self.stats["num_forwards"] += 1
 
@@ -465,10 +490,13 @@ class ActivationCollector:
             timestep = self.sample_timestep()
             self.stats["timestep_distribution"].append(timestep)
 
-            # 获取对应的 context
+            # 获取对应的 context (确保在 GPU 上)
             context = context_list[sample_idx % len(context_list)]
             if isinstance(context, list):
                 context = context[0]
+            # 确保 context 在正确设备上
+            if context.device.type != "cuda":
+                context = context.to(self.device)
 
             # 创建噪声 latent
             latent = self.create_noisy_latent(batch_size=1)
@@ -478,8 +506,13 @@ class ActivationCollector:
 
             # 空间 token 采样并存储
             for layer_key, activation in activations.items():
+                # activation 已经是 [B, L, D] 形状 (B=1)
+                # 如果需要，添加 batch 维度
+                if activation.dim() == 2:
+                    activation = activation.unsqueeze(0)
+
                 sampled = self.spatial_token_sampling(
-                    activation.unsqueeze(0),  # [1, L, D]
+                    activation,  # [1, L, D]
                     self.config.tokens_per_sample
                 )
                 self._activation_cache[layer_key].append(sampled)
@@ -507,6 +540,7 @@ class ActivationCollector:
         保存激活缓存到磁盘
 
         格式: BF16/FP16, CPU tensor
+        文件名: layer{idx}.pt (简洁格式)
         """
         self.logger.info(f"保存激活缓存到: {cache_dir}")
 
@@ -519,11 +553,12 @@ class ActivationCollector:
             # 转换精度并移到 CPU
             all_tokens = all_tokens.to(save_dtype).cpu()
 
-            # 保存
-            save_path = cache_dir / f"{layer_key}.pt"
+            # 从 "block_out.layer14" 提取 "layer14" 作为文件名
+            simple_key = layer_key.split(".")[-1] if "." in layer_key else layer_key
+            save_path = cache_dir / f"{simple_key}.pt"
             torch.save(all_tokens, save_path)
 
-            self.logger.info(f"  {layer_key}: {all_tokens.shape}, {all_tokens.dtype}")
+            self.logger.info(f"  {simple_key}: {all_tokens.shape}, {all_tokens.dtype}")
 
         # 保存配置
         config_path = cache_dir / "config.json"
