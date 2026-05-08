@@ -332,24 +332,27 @@ def validate_initialization(
         print(f"    max deviation from 1: {norm_max_dev:.2e}")
 
     # 2. Reconstruction MSE
-    # x_norm [N, D] -> Wenc @ x_norm.T -> z -> Wdec @ z -> x_hat
-    # 简化: 使用 PCA 重建
+    # SAE 正确前向传播:
+    # x_norm -> 中心化(x_norm - bpre) -> 编码(ReLU) -> 解码 -> 去中心化(+bpre) -> x_hat
     Wenc = Wdec.T  # [d_hidden, D]
 
     # 采样一小批计算 MSE
     n_sample = min(10000, x_norm.shape[0])
     x_sample = x_norm[:n_sample]  # [n_sample, D]
 
-    # 编码: z = ReLU(Wenc @ x.T).T
-    z = F.relu(x_sample @ Wenc.T)  # [n_sample, d_hidden]
+    # Step 1: 中心化 (关键步骤!)
+    x_centered = x_sample - bpre  # [n_sample, D]
 
-    # 解码: x_hat = z @ Wdec.T
-    x_hat = z @ Wdec.T  # [n_sample, D]
+    # Step 2: 编码
+    z = F.relu(x_centered @ Wenc.T)  # [n_sample, d_hidden]
 
-    # 加预偏置
-    x_hat = x_hat + bpre
+    # Step 3: 解码
+    x_hat_centered = z @ Wdec.T  # [n_sample, D]
 
-    # MSE
+    # Step 4: 去中心化
+    x_hat = x_hat_centered + bpre  # [n_sample, D]
+
+    # MSE: 比较 x_hat 和原始 x_norm
     mse = F.mse_loss(x_hat, x_sample).item()
     results["reconstruction_mse"] = mse
 
