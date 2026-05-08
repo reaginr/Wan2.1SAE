@@ -205,20 +205,62 @@ def check_sae_initialization(
 def main():
     parser = argparse.ArgumentParser(description="SAE 初始化质量检查")
 
-    parser.add_argument("--init_file", type=str, required=True,
-                        help="初始化文件路径，如 ./sae_init/sae_init_layer14.pt")
+    parser.add_argument("--init_dir", type=str, default="./sae_init",
+                        help="初始化文件目录")
     parser.add_argument("--cache_dir", type=str, default="./cache",
                         help="激活缓存目录")
-    parser.add_argument("--layer", type=int, default=14,
-                        help="层索引")
+    parser.add_argument("--layer", type=str, default="all",
+                        help="层索引，如 '14' 或 'all' 或 '14,19,24,29'")
 
     args = parser.parse_args()
 
-    check_sae_initialization(
-        init_file=args.init_file,
-        cache_dir=args.cache_dir,
-        layer_idx=args.layer,
-    )
+    # 确定要检查的层
+    if args.layer.lower() == "all":
+        layers = [14, 19, 24, 29]
+    else:
+        layers = [int(x.strip()) for x in args.layer.split(",")]
+
+    # 批量检查
+    all_results = {}
+
+    for layer_idx in layers:
+        init_file = Path(args.init_dir) / f"sae_init_layer{layer_idx}.pt"
+
+        if not init_file.exists():
+            print(f"\n⚠ 跳过 Layer {layer_idx}: 文件不存在 {init_file}")
+            continue
+
+        result = check_sae_initialization(
+            init_file=str(init_file),
+            cache_dir=args.cache_dir,
+            layer_idx=layer_idx,
+        )
+
+        all_results[f"layer{layer_idx}"] = result
+
+    # 汇总
+    print("\n" + "=" * 70)
+    print("批量检查汇总")
+    print("=" * 70)
+
+    for layer_key, result in all_results.items():
+        status = "✓" if result.get("all_passed", False) else "⚠"
+        mse = result.get("reconstruction_mse", "N/A")
+        dead = result.get("dead_neuron_ratio", "N/A")
+
+        if isinstance(mse, float):
+            mse = f"{mse:.4f}"
+        if isinstance(dead, float):
+            dead = f"{dead:.2%}"
+
+        print(f"  {layer_key}: {status} | MSE={mse} | Dead={dead}")
+
+    # 总结
+    passed = sum(1 for r in all_results.values() if r.get("all_passed", False))
+    total = len(all_results)
+
+    print(f"\n  通过: {passed}/{total}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
