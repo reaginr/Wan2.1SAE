@@ -132,52 +132,6 @@ def randomized_pca(
     return components, explained_variance, explained_variance_ratio
 
 
-def residual_pca_adaptive(
-    x_residual: torch.Tensor,
-    variance_threshold: float = RESIDUAL_VARIANCE_THRESHOLD,
-    min_components: int = RESIDUAL_PCA_MIN,
-    max_components: int = RESIDUAL_PCA_MAX,
-    verbose: bool = True,
-) -> Tuple[torch.Tensor, int, float]:
-    """
-    自适应 Residual PCA
-
-    根据累计方差阈值确定成分数，而非固定数量
-
-    返回:
-        components: [D, n_selected]
-        n_selected: 选择的成分数
-        cumulative_variance: 最终累计方差
-    """
-    D = x_residual.shape[1]
-    max_components = min(max_components, D)
-
-    if verbose:
-        print(f"  [Residual PCA] 自适应选择 (阈值: {variance_threshold})")
-
-    # 计算足够多的成分
-    components, explained_var, explained_ratio = randomized_pca(
-        x_residual, max_components, verbose=False
-    )
-
-    # 找到达到阈值的成分数
-    cumsum = explained_ratio.cumsum(0)
-    n_selected = min_components
-
-    for i in range(min_components, max_components):
-        if cumsum[i].item() >= variance_threshold:
-            n_selected = i + 1
-            break
-    else:
-        n_selected = max_components
-
-    if verbose:
-        actual_variance = cumsum[n_selected - 1].item()
-        print(f"  [Residual PCA] 选择 {n_selected} 成分, 累计方差: {actual_variance*100:.2f}%")
-
-    return components[:, :n_selected], n_selected, cumsum[n_selected - 1].item()
-
-
 def generate_random_orthogonal(
     d_model: int,
     n_vectors: int,
