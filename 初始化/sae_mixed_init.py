@@ -45,15 +45,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # ============================================================================
 
 # 初始化组成 (hidden_dim=12288, d_model=1536)
-N_PCA_PRINCIPAL = 1536           # Top PCA components
-N_RANDOM_ORTHOGONAL = 3072       # Random orthogonal directions
-N_RANDOM_GAUSSIAN = 2560         # Random Gaussian directions
-N_ACTIVATION_SAMPLE_MAX = 3072   # Activation samples (最多 hidden_dim 的 25%)
+# 固定比例配置
+N_PCA_PRINCIPAL = 1536       # PCA Principal
+N_RESIDUAL_PCA = 768         # Residual PCA
+N_RANDOM_ORTHOGONAL = 1024   # Orthogonal
+N_ACTIVATION_SAMPLE = 1536   # Activation Sample
+N_SPARSE_GAUSSIAN = 7424     # Sparse Gaussian
 
-# Residual PCA 配置
-RESIDUAL_VARIANCE_THRESHOLD = 0.80  # 累计方差达到 80% 停止
-RESIDUAL_PCA_MIN = 256              # 最少成分数
-RESIDUAL_PCA_MAX = 1024             # 最多成分数
+# 验证总数
+assert N_PCA_PRINCIPAL + N_RESIDUAL_PCA + N_RANDOM_ORTHOGONAL + N_ACTIVATION_SAMPLE + N_SPARSE_GAUSSIAN == 12288, \
+    f"总数应为 12288, 当前: {N_PCA_PRINCIPAL + N_RESIDUAL_PCA + N_RANDOM_ORTHOGONAL + N_ACTIVATION_SAMPLE + N_SPARSE_GAUSSIAN}"
 
 # 质量标准 - Geometry
 MAX_MUTUAL_COHERENCE = 0.30
@@ -460,7 +461,7 @@ def mixed_source_initialization(
     verbose: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
     """
-    Competition-Oriented 混合源初始化
+    Competition-Oriented 混合源初始化 (固定比例)
     """
     N, D = x_norm.shape
     device = x_norm.device
@@ -470,20 +471,23 @@ def mixed_source_initialization(
         print(f"[Competition-Oriented Mixed Initialization]")
         print(f"{'='*70}")
         print(f"  输入: [{N}, {D}], d_hidden={d_hidden}")
+        print(f"  比例: PCA={N_PCA_PRINCIPAL}, Residual={N_RESIDUAL_PCA}, "
+              f"Ortho={N_RANDOM_ORTHOGONAL}, Activation={N_ACTIVATION_SAMPLE}, "
+              f"Gaussian={N_SPARSE_GAUSSIAN}")
 
     components_list = []
     stats = {}
 
     # ========== 1. 几何中位数 ==========
     if verbose:
-        print(f"\n[1/6] 计算几何中位数...")
+        print(f"\n[1/5] 计算几何中位数...")
 
     bpre = weiszfeld_geometric_median(x_norm, verbose=verbose)
     x_centered = x_norm - bpre
 
     # ========== 2. PCA Principal (1536) ==========
     if verbose:
-        print(f"\n[2/6] PCA Principal Directions ({N_PCA_PRINCIPAL})...")
+        print(f"\n[2/5] PCA Principal Directions ({N_PCA_PRINCIPAL})...")
 
     pca_components, pca_var, pca_ratio = randomized_pca(x_centered, N_PCA_PRINCIPAL, verbose)
     W_pca = pca_components.clone()
@@ -495,9 +499,9 @@ def mixed_source_initialization(
     if verbose:
         print(f"  形状: {W_pca.shape}")
 
-    # ========== 3. Residual PCA (自适应) ==========
+    # ========== 3. Residual PCA (768) ==========
     if verbose:
-        print(f"\n[3/6] Residual PCA (自适应)...")
+        print(f"\n[3/5] Residual PCA Directions ({N_RESIDUAL_PCA})...")
 
     x_reconstructed = x_centered @ W_pca @ W_pca.T
     x_residual = x_centered - x_reconstructed
@@ -508,19 +512,19 @@ def mixed_source_initialization(
     if verbose:
         print(f"  残差范数比: {residual_norm_ratio:.4f}")
 
-    W_residual, n_residual, residual_variance = residual_pca_adaptive(
-        x_residual,
-        variance_threshold=RESIDUAL_VARIANCE_THRESHOLD,
-        verbose=verbose,
-    )
+    # 固定数量的 Residual PCA
+    residual_components, _, _ = randomized_pca(x_residual, N_RESIDUAL_PCA, verbose=False)
+    W_residual = residual_components.clone()
     components_list.append(W_residual)
 
-    stats["n_residual"] = n_residual
-    stats["residual_variance"] = residual_variance
+    stats["n_residual"] = W_residual.shape[1]
 
-    # ========== 4. Random Orthogonal (3072) ==========
     if verbose:
-        print(f"\n[4/6] Random Orthogonal Directions ({N_RANDOM_ORTHOGONAL})...")
+        print(f"  形状: {W_residual.shape}")
+
+    # ========== 4. Random Orthogonal (1024) ==========
+    if verbose:
+        print(f"\n[4/5] Random Orthogonal Directions ({N_RANDOM_ORTHOGONAL})...")
 
     W_ortho = generate_random_orthogonal(D, N_RANDOM_ORTHOGONAL, device)
     components_list.append(W_ortho)
@@ -530,39 +534,32 @@ def mixed_source_initialization(
     if verbose:
         print(f"  形状: {W_ortho.shape}")
 
-    # ========== 5. Random Gaussian (2560) ==========
+    # ========== 5. Activation Sample (1536, decorrelated) ==========
     if verbose:
-        print(f"\n[5/6] Random Gaussian Directions ({N_RANDOM_GAUSSIAN})...")
-
-    W_gauss = torch.randn(D, N_RANDOM_GAUSSIAN, device=device)
-    W_gauss = F.normalize(W_gauss, dim=0)
-    components_list.append(W_gauss)
-
-    stats["n_gauss"] = N_RANDOM_GAUSSIAN
-
-    if verbose:
-        print(f"  形状: {W_gauss.shape}")
-
-    # ========== 6. Activation Sample (decorrelated) ==========
-    # 计算剩余需要的 activation 数量
-    current_total = sum(c.shape[1] for c in components_list)
-    n_activation = d_hidden - current_total
-
-    # 限制最大值
-    n_activation = min(n_activation, N_ACTIVATION_SAMPLE_MAX)
-
-    if verbose:
-        print(f"\n[6/6] Activation Samples ({n_activation}, decorrelated)...")
+        print(f"\n[5/5] Activation Samples ({N_ACTIVATION_SAMPLE}, decorrelated)...")
 
     # 合并已有 dictionary 用于 decorrelation
     W_existing = torch.cat(components_list, dim=1)
 
     W_activation = sample_activations_decorrelated(
-        x_norm, n_activation, W_existing, device, verbose
+        x_norm, N_ACTIVATION_SAMPLE, W_existing, device, verbose
     )
     components_list.append(W_activation)
 
-    stats["n_activation"] = n_activation
+    stats["n_activation"] = N_ACTIVATION_SAMPLE
+
+    # ========== 6. Sparse Gaussian (7424) ==========
+    if verbose:
+        print(f"\n[6/6] Sparse Gaussian Directions ({N_SPARSE_GAUSSIAN})...")
+
+    W_gauss = torch.randn(D, N_SPARSE_GAUSSIAN, device=device)
+    W_gauss = F.normalize(W_gauss, dim=0)
+    components_list.append(W_gauss)
+
+    stats["n_gauss"] = N_SPARSE_GAUSSIAN
+
+    if verbose:
+        print(f"  形状: {W_gauss.shape}")
 
     # ========== 合并 ==========
     if verbose:
@@ -573,8 +570,8 @@ def mixed_source_initialization(
     if verbose:
         print(f"  合并后形状: {Wdec.shape}")
         print(f"  来源: PCA={stats['n_pca']}, Residual={stats['n_residual']}, "
-              f"Ortho={stats['n_ortho']}, Gauss={stats['n_gauss']}, "
-              f"Activation={stats['n_activation']}")
+              f"Ortho={stats['n_ortho']}, Activation={stats['n_activation']}, "
+              f"Gaussian={stats['n_gauss']}")
 
     # 验证维度
     assert Wdec.shape[1] == d_hidden, f"维度不匹配: {Wdec.shape[1]} != {d_hidden}"
