@@ -217,18 +217,18 @@ class ActivationExtractor:
         self,
         model_path: str,
         device: str = "cuda",
-        offload_text_encoder: bool = True,
+        t5_cpu: bool = True,
     ):
         self.model_path = model_path
         self.device = device
-        self.offload_text_encoder = offload_text_encoder
+        self.t5_cpu = t5_cpu
 
         logger.info(f"Loading Wan model from {model_path}")
         self.t2v = WanT2V(
             config=t2v_1_3B,
             checkpoint_dir=model_path,
             device_id=0,
-            offload_text_encoder=offload_text_encoder,
+            t5_cpu=t5_cpu,
         )
         logger.info("Wan model loaded successfully")
 
@@ -287,7 +287,7 @@ class ActivationExtractor:
                 with torch.no_grad():
                     try:
                         _ = self.t2v.generate(
-                            prompt=prompt,
+                            input_prompt=prompt,
                             size=(832, 480),
                             frame_num=81,
                             sampling_steps=sampling_steps,
