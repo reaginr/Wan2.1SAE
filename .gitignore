@@ -59,3 +59,4 @@ train_sae.py
 !diverse_500.txt
 generate_*.py
 run_jailbreak*
+!final_clean_prompts.txt
