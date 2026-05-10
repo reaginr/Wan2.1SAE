@@ -119,6 +119,35 @@ class TrainingConfig:
         """后处理：计算派生值"""
         self.effective_batch_size = self.batch_size * self.accum_steps
 
+        # 自动调整 warmup_steps
+        # 如果 total_steps 较小，按比例调整 warmup
+        if self.total_steps < self.warmup_steps:
+            # 快速测试模式：warmup 占 10% 或至少 10 步
+            self.warmup_steps = max(10, self.total_steps // 10)
+            import warnings
+            warnings.warn(
+                f"total_steps ({self.total_steps}) < 默认 warmup_steps (4000), "
+                f"自动调整 warmup_steps 为 {self.warmup_steps}"
+            )
+
+        # 自动调整 val_interval 和 checkpoint_interval
+        # 确保在训练过程中至少有几次验证和保存
+        if self.total_steps < self.val_interval:
+            self.val_interval = max(10, self.total_steps // 5)
+            import warnings
+            warnings.warn(
+                f"total_steps ({self.total_steps}) < 默认 val_interval (160), "
+                f"自动调整 val_interval 为 {self.val_interval}"
+            )
+
+        if self.total_steps < self.checkpoint_interval:
+            self.checkpoint_interval = max(20, self.total_steps // 2)
+            import warnings
+            warnings.warn(
+                f"total_steps ({self.total_steps}) < 默认 checkpoint_interval (400), "
+                f"自动调整 checkpoint_interval 为 {self.checkpoint_interval}"
+            )
+
     def validate(self) -> None:
         """
         验证配置符合 TODO_list_v3.md 规范
@@ -140,9 +169,9 @@ class TrainingConfig:
         assert self.min_lr < self.lr, \
             f"min_lr ({self.min_lr}) 应小于 lr ({self.lr})"
 
-        # 步数检查
-        assert self.warmup_steps < self.total_steps, \
-            f"warmup_steps ({self.warmup_steps}) 应小于 total_steps ({self.total_steps})"
+        # 步数检查 (放宽：允许 warmup_steps == total_steps)
+        assert self.warmup_steps <= self.total_steps, \
+            f"warmup_steps ({self.warmup_steps}) 应小于等于 total_steps ({self.total_steps})"
 
         # 梯度累积检查
         assert self.accum_steps >= 1, \
