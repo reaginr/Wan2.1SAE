@@ -961,12 +961,16 @@ class ParamTestTokenSampler:
         chunks = []
         available_starts = list(range(0, F_total - chunk_size + 1))
 
+        # 使用 Python random 避免设备不匹配问题
+        import random
+        random.seed(self.config.seed)
+
         for _ in range(min(num_chunks, len(available_starts))):
             if not available_starts:
                 break
 
             # 随机选择一个起始帧
-            idx = torch.randint(0, len(available_starts), (1,), generator=self._generator, device=device).item()
+            idx = random.randint(0, len(available_starts) - 1)
             start = available_starts.pop(idx)
             end = min(start + chunk_size, F_total)
 
@@ -1002,8 +1006,8 @@ class ParamTestTokenSampler:
         num_blocks_w = W // block_size
 
         if num_blocks_h == 0 or num_blocks_w == 0:
-            # 如果 block 太大，随机采样
-            indices = torch.randperm(H * W, generator=self._generator, device=device)[:min(64, H * W)]
+            # 如果 block 太大，随机采样 (不使用 generator 避免 device 问题)
+            indices = torch.randperm(H * W, device=device)[:min(64, H * W)]
             frame_tokens = activations_flat[frame_start:frame_start + H * W]
             return frame_tokens[indices], {"blocks_sampled": 0}
 
@@ -1013,11 +1017,13 @@ class ParamTestTokenSampler:
             for bw in range(num_blocks_w):
                 all_block_positions.append((bh, bw))
 
-        # 随机采样 num_blocks 个 block
+        # 随机采样 num_blocks 个 block (使用 Python random 避免 device 问题)
+        import random
+        random.seed(self.config.seed + frame_idx)
         n_sample_blocks = min(num_blocks, len(all_block_positions))
-        perm = torch.randperm(len(all_block_positions), generator=self._generator, device=device)[:n_sample_blocks]
+        selected_indices = random.sample(range(len(all_block_positions)), n_sample_blocks)
 
-        selected_blocks = [all_block_positions[i] for i in perm.tolist()]
+        selected_blocks = [all_block_positions[i] for i in selected_indices]
 
         # 从每个 block 中采样 token
         all_tokens = []
@@ -1045,8 +1051,8 @@ class ParamTestTokenSampler:
             if len(block_indices) <= n_per_block:
                 sampled_indices = block_indices
             else:
-                # 随机采样 (后续可以在 sample() 中应用 norm bias)
-                perm_block = torch.randperm(len(block_indices), generator=self._generator, device=device)
+                # 随机采样 (不使用 generator 避免 device 问题)
+                perm_block = torch.randperm(len(block_indices), device=device)
                 sampled_indices = block_indices[perm_block[:n_per_block]]
 
             all_tokens.append(activations_flat[sampled_indices])
@@ -1072,7 +1078,8 @@ class ParamTestTokenSampler:
         高 norm token 的采样概率略大，但不完全排除低 norm token
         """
         if not self.config.norm_bias_enabled:
-            perm = torch.randperm(len(tokens), generator=self._generator, device=device)
+            # 不使用 generator 避免 device 问题
+            perm = torch.randperm(len(tokens), device=device)
             return tokens[perm[:target_count]]
 
         # 计算 norm
@@ -1088,12 +1095,11 @@ class ParamTestTokenSampler:
         weights = (norms_normalized + 0.1) ** strength  # +0.1 避免 0 权重
         weights = weights / weights.sum()
 
-        # 根据权重采样
+        # 根据权重采样 (不使用 generator 避免 device 问题)
         indices = torch.multinomial(
             weights,
             num_samples=min(target_count, len(tokens)),
             replacement=False,
-            generator=self._generator,
         )
 
         return tokens[indices]
@@ -1144,7 +1150,8 @@ class ParamTestTokenSampler:
         简化采样 (当 token 数不足时使用)
         """
         target = min(self.config.tokens_per_timestep, len(activations_flat))
-        perm = torch.randperm(len(activations_flat), generator=self._generator, device=device)
+        # 不使用 generator 避免 device 问题
+        perm = torch.randperm(len(activations_flat), device=device)
         sampled = activations_flat[perm[:target]]
 
         metadata = {
@@ -1159,7 +1166,7 @@ class ParamTestTokenSampler:
     def reset(self):
         """重置采样器状态"""
         self._block_features = None
-        self._generator.manual_seed(self.config.seed)
+        # 重置时不需要手动设置种子，因为使用 Python random
 
 
 # ============================================================================
