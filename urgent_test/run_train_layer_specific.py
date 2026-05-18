@@ -514,8 +514,9 @@ class WanActivationExtractor:
             context = self.t2v.text_encoder([prompt], device)
             context_null = self.t2v.text_encoder([""], device)
         else:
+            # T5 在 CPU 上，先在 CPU 编码，再移动到 GPU
             context = self.t2v.text_encoder([prompt], torch.device('cpu'))
-            context_null = self.t2v.text_encoder([""], device)
+            context_null = self.t2v.text_encoder([""], torch.device('cpu'))
             context = [t.to(device) for t in context]
             context_null = [t.to(device) for t in context_null]
 
@@ -983,19 +984,19 @@ def main():
         description="Layer-Specific SAE Training (TODO_list_v4 Compliant)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+Examples (从项目根目录运行):
   # 参数测试阶段 (快速验证)
-  python run_train_layer_specific.py --config 紧急/config_test.py
+  python urgent_test/run_train_layer_specific.py --config urgent_test/config_test.py
 
   # 预训练阶段
-  python run_train_layer_specific.py --config 紧急/config_pretrain.py
+  python urgent_test/run_train_layer_specific.py --config urgent_test/config_pretrain.py
 
   # 正式训练阶段
-  python run_train_layer_specific.py --config 紧急/config_formal.py
+  python urgent_test/run_train_layer_specific.py --config urgent_test/config_formal.py
 
   # 命令行覆盖配置文件参数
-  python run_train_layer_specific.py --config 紧急/config_test.py --steps 200 --max_prompts 20
-  python run_train_layer_specific.py --config 紧急/config_formal.py --tokens_per_timestep 1024 --lr 1e-4
+  python urgent_test/run_train_layer_specific.py --config urgent_test/config_test.py --steps 200 --max_prompts 20
+  python urgent_test/run_train_layer_specific.py --config urgent_test/config_formal.py --tokens_per_timestep 1024 --lr 1e-4
         """,
     )
 

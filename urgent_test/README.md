@@ -2,26 +2,32 @@
 
 > 目标：证明 SAE latent 中存在可解释风险概念方向
 
-严格按照 TODO_list_v4.md (紧急版) 规范实现。
+严格按照 TODO_list_v4.md 规范实现。
 
 ## 目录结构
 
 ```
-紧急/
-├── 1_extract_latents.py      # Step 1: SAE Latent 提取
-├── 2_feature_analysis.py     # Step 2: Cohen's d 分析
-├── 3_build_vectors.py        # Step 3: Concept Vector 构建
-├── 4_validate_concepts.py    # Step 4: AUC 验证
-├── 5_feature_interpret.py    # Step 5: Feature 可解释性分析
-├── 6_intervention.py         # Step 6: 概念干预实验
-├── 7_paper_results.py        # Step 7: 论文结果生成
-├── 8_evaluate_video_quality.py  # [新增] Step 8: 视频质量评估
-├── video_generation.py       # [新增] 带SAE干预的视频生成
-├── generate_and_evaluate.py  # [新增] 完整生成+评估流程
-├── run_pipeline.py           # 一键运行完整 Pipeline
-├── check_prerequisites.py    # 环境检查脚本
-├── README.md                 # 本文件
-└── datasets/                 # 数据集目录
+urgent_test/
+├── config.py                    # 统一配置文件
+├── config_test.py               # 参数测试阶段配置
+├── config_pretrain.py           # 预训练阶段配置
+├── config_formal.py             # 正式训练阶段配置
+├── run_train_layer_specific.py  # SAE 训练脚本
+├── training_monitor.py          # 训练监控可视化
+├── 1_extract_latents.py         # Step 1: SAE Latent 提取
+├── 2_feature_analysis.py        # Step 2: Cohen's d 分析
+├── 3_build_vectors.py           # Step 3: Concept Vector 构建
+├── 4_validate_concepts.py       # Step 4: AUC 验证
+├── 5_feature_interpret.py       # Step 5: Feature 可解释性分析
+├── 6_intervention.py            # Step 6: 概念干预实验
+├── 7_paper_results.py           # Step 7: 论文结果生成
+├── 8_evaluate_video_quality.py  # Step 8: 视频质量评估
+├── video_generation.py          # 带SAE干预的视频生成
+├── generate_and_evaluate.py     # 完整生成+评估流程
+├── run_pipeline.py              # 一键运行完整 Pipeline
+├── check_prerequisites.py       # 环境检查脚本
+├── README.md                    # 本文件
+└── datasets/                    # 数据集目录
 ```
 
 ## 快速开始
@@ -63,17 +69,16 @@ final_cleaned/
 #### 方案 A：一键运行（推荐）
 
 ```bash
-cd 紧急
-
+# 从项目根目录运行
 # 运行 Steps 1-7 (Latent 提取到论文结果生成)
-python run_pipeline.py \
+python urgent_test/run_pipeline.py \
     --model_path /path/to/Wan2.1-T2V-1.3B \
     --sae_checkpoint ./sae_init_layer29.pt \
-    --prompt_dir ./datasets \
+    --prompt_dir ./final_cleaned \
     --output_dir ./outputs
 
 # 运行完整流程，包含视频生成与评估
-python run_pipeline.py \
+python urgent_test/run_pipeline.py \
     --model_path /path/to/Wan2.1-T2V-1.3B \
     --sae_checkpoint ./sae_init_layer29.pt \
     --prompt_dir ./final_cleaned \
