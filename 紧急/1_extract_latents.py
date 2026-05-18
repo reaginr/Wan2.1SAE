@@ -6,7 +6,7 @@ Layer29 SAE Latent 提取 Pipeline
 核心约束：
 - 只处理 Layer29
 - Timestep ∈ [150, 800]
-- Truncated Gaussian Sampling: μ=300, σ=80
+- Truncated Gaussian Sampling: μ=300, σ=60 (Layer29特定)
 - 禁止 oversample 和 decorrelation
 
 输出：
@@ -39,6 +39,16 @@ from tqdm import tqdm
 # 添加项目根目录
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# 导入统一配置
+from config import (
+    PATH_PARAMS,
+    TIMESTEP_PARAMS,
+    SAE_PARAMS,
+    SAMPLING_PARAMS,
+    DATASET_PARAMS,
+    validate_all_configs,
+)
+
 # 日志配置
 logging.basicConfig(
     level=logging.INFO,
@@ -47,41 +57,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 验证配置
+validate_all_configs()
+
 
 # ============================================================================
-# 配置
+# 配置 (从统一配置文件读取，支持命令行覆盖)
 # ============================================================================
+
+# Layer29 的特定参数
+LAYER_29_PARAMS = TIMESTEP_PARAMS.layer_params[29]
 
 @dataclass
 class LatentExtractionConfig:
     """Latent 提取配置"""
 
-    # 模型配置
-    model_path: str = "./Wan2.1-T2V-1.3B"
+    # 模型配置 (从统一配置)
+    model_path: str = PATH_PARAMS.model_path
     sae_checkpoint: str = ""  # Layer29 SAE 初始化权重
 
-    # 层配置 (固定)
+    # 层配置 (固定为 Layer29)
     layer_idx: int = 29
-    hook_type: str = "block_out"
+    hook_type: str = SAE_PARAMS.hook_mode
 
-    # Timestep 配置 (严格约束)
-    min_timestep: int = 150
-    max_timestep: int = 800
-    timestep_mu: float = 300.0
-    timestep_sigma: float = 80.0
-    num_timesteps: int = 5  # 每prompt采样几个timestep
+    # Timestep 配置 (从统一配置，Layer29特定参数)
+    min_timestep: int = LAYER_29_PARAMS["min_t"]
+    max_timestep: int = LAYER_29_PARAMS["max_t"]
+    timestep_mu: float = LAYER_29_PARAMS["mu"]
+    timestep_sigma: float = LAYER_29_PARAMS["sigma"]
+    num_timesteps: int = SAMPLING_PARAMS.num_timesteps_per_prompt
 
     # Token 配置
-    tokens_per_timestep: int = 1536  # 每timestep保留多少token
-    spatial_stride: int = 1  # 固定为1
+    tokens_per_timestep: int = SAMPLING_PARAMS.tokens_per_timestep
+    spatial_stride: int = SAMPLING_PARAMS.spatial_stride
 
     # SAE 配置
-    d_model: int = 1536
-    d_hidden: int = 12288  # 8x expansion
-    top_k: int = 128
+    d_model: int = SAE_PARAMS.d_model
+    d_hidden: int = SAE_PARAMS.d_hidden
+    top_k: int = SAE_PARAMS.top_k
 
     # 数据集配置
-    prompt_dir: str = "./datasets"
+    prompt_dir: str = PATH_PARAMS.prompt_dir
     output_dir: str = "./outputs/layer29_latents"
 
     # 运行配置
@@ -90,11 +106,7 @@ class LatentExtractionConfig:
     batch_size: int = 1  # 每次处理1个prompt
 
     # 类别
-    categories: List[str] = field(default_factory=lambda: [
-        "sex_positive", "sex_negative",
-        "violence_positive", "violence_negative",
-        "clean_prompts"
-    ])
+    categories: List[str] = field(default_factory=lambda: list(DATASET_PARAMS.category_counts.keys()))
 
     def validate(self):
         """验证配置"""

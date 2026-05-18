@@ -3,6 +3,8 @@
 
 在 Wan DiT 采样过程中，对 Layer29 激活应用 SAE 概念干预
 
+使用统一配置文件 config.py
+
 核心流程:
 1. 加载 Wan 模型
 2. 加载 SAE 和概念向量
@@ -37,6 +39,16 @@ from tqdm import tqdm
 # 添加项目根目录
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# 导入统一配置
+from config import (
+    PATH_PARAMS,
+    TIMESTEP_PARAMS,
+    SAE_PARAMS,
+    VIDEO_PARAMS,
+    SAMPLING_PARAMS,
+    validate_all_configs,
+)
+
 # 日志配置
 logging.basicConfig(
     level=logging.INFO,
@@ -45,18 +57,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 验证配置
+validate_all_configs()
+
 
 # ============================================================================
-# 配置
+# 配置 (从统一配置文件读取)
 # ============================================================================
+
+# Layer29 的特定参数
+LAYER_29_PARAMS = TIMESTEP_PARAMS.layer_params[29]
 
 @dataclass
 class VideoGenerationConfig:
     """视频生成配置"""
 
     # 模型路径
-    model_path: str = "./Wan2.1-T2V-1.3B"
-    sae_checkpoint: str = "./sae_init_layer29.pt"
+    model_path: str = PATH_PARAMS.model_path
+    sae_checkpoint: str = PATH_PARAMS.sae_init_dir + "/sae_init_layer29.pt"
 
     # 概念向量
     vector_dir: str = "./outputs/concept_vectors"
@@ -67,17 +85,23 @@ class VideoGenerationConfig:
     layer_idx: int = 29
     gamma: float = 0.5  # 干预强度
 
-    # SAE 配置
-    d_model: int = 1536
-    d_hidden: int = 12288
-    top_k: int = 128
+    # SAE 配置 (从统一配置)
+    d_model: int = SAE_PARAMS.d_model
+    d_hidden: int = SAE_PARAMS.d_hidden
+    top_k: int = SAE_PARAMS.top_k
 
-    # 视频配置
-    frame_num: int = 81
-    size: Tuple[int, int] = (832, 480)
-    sampling_steps: int = 30
+    # 视频配置 (从统一配置)
+    frame_num: int = VIDEO_PARAMS.frame_num
+    size: Tuple[int, int] = VIDEO_PARAMS.size
+    sampling_steps: int = SAMPLING_PARAMS.sampling_steps
     shift: float = 5.0
     guide_scale: float = 5.0
+
+    # Timestep 配置 (Layer29 特定参数)
+    min_timestep: int = LAYER_29_PARAMS["min_t"]
+    max_timestep: int = LAYER_29_PARAMS["max_t"]
+    timestep_mu: float = LAYER_29_PARAMS["mu"]
+    timestep_sigma: float = LAYER_29_PARAMS["sigma"]
 
     # 输出
     output_dir: str = "./outputs/generated_videos"
@@ -88,25 +112,25 @@ class VideoGenerationConfig:
 
 
 # ============================================================================
-# Timestep 采样器 (保持与 extract_latents 一致)
+# Timestep 采样器 (使用统一配置的 Layer29 参数)
 # ============================================================================
 
 class TruncatedGaussianSampler:
     """
     截断高斯 timestep 采样器
 
-    严格约束:
+    严格约束 (Layer29):
     - t ∈ [150, 800]
     - μ = 300
-    - σ = 80
+    - σ = 60
     """
 
     def __init__(
         self,
-        min_t: int = 150,
-        max_t: int = 800,
-        mu: float = 300.0,
-        sigma: float = 80.0,
+        min_t: int = LAYER_29_PARAMS["min_t"],
+        max_t: int = LAYER_29_PARAMS["max_t"],
+        mu: float = LAYER_29_PARAMS["mu"],
+        sigma: float = LAYER_29_PARAMS["sigma"],
     ):
         self.min_t = min_t
         self.max_t = max_t

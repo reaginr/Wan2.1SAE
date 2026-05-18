@@ -198,7 +198,14 @@ class PipelineRunner:
         max_pairs_per_concept: int = 5,
         gamma_values: List[float] = None,
     ):
-        self.base_dir = Path(base_dir)
+        # 将 base_dir 解析为绝对路径
+        # 如果 base_dir 是 "." 或当前目录名，则使用当前工作目录
+        cwd = os.getcwd()
+        if base_dir == "." or base_dir == os.path.basename(cwd):
+            self.base_dir = Path(cwd)
+        else:
+            self.base_dir = Path(base_dir).resolve()
+
         self.model_path = model_path
         self.sae_checkpoint = sae_checkpoint
         self.prompt_dir = prompt_dir
@@ -229,6 +236,9 @@ class PipelineRunner:
 
     def get_script_path(self, script: str) -> str:
         """获取脚本路径"""
+        # 如果 base_dir 是当前工作目录，直接返回脚本名
+        if self.base_dir == Path(os.getcwd()):
+            return script
         return str(self.base_dir / script)
 
     def run_step1(self) -> bool:
@@ -248,7 +258,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("1_extract_latents.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run_step2(self) -> bool:
@@ -266,7 +276,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("2_feature_analysis.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run_step3(self) -> bool:
@@ -285,7 +295,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("3_build_vectors.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run_step4(self) -> bool:
@@ -304,7 +314,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("4_validate_concepts.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run_step5(self) -> bool:
@@ -323,7 +333,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("5_feature_interpret.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run_step6(self) -> bool:
@@ -350,7 +360,7 @@ class PipelineRunner:
             success = run_script(
                 self.get_script_path("6_intervention.py"),
                 args,
-                cwd=str(self.base_dir),
+                cwd=None,  # 脚本在当前目录，不需要设置 cwd
             )
             results.append(success)
 
@@ -374,7 +384,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("7_paper_results.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run_step8(self) -> bool:
@@ -409,7 +419,7 @@ class PipelineRunner:
         return run_script(
             self.get_script_path("generate_and_evaluate.py"),
             args,
-            cwd=str(self.base_dir),
+            cwd=None,  # 脚本在当前目录，不需要设置 cwd
         )
 
     def run(self) -> Dict[str, Any]:
@@ -542,8 +552,8 @@ Examples:
     )
 
     # 路径配置
-    parser.add_argument("--base_dir", type=str, default="./紧急",
-                        help="Pipeline 脚本所在目录")
+    parser.add_argument("--base_dir", type=str, default=".",
+                        help="Pipeline 脚本所在目录 (默认当前目录)")
     parser.add_argument("--model_path", type=str, required=True,
                         help="Wan model path")
     parser.add_argument("--sae_checkpoint", type=str, required=True,
