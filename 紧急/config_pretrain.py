@@ -28,7 +28,7 @@ from config import (
 PRETRAIN_PATH_PARAMS = {
     "model_path": PATH_PARAMS.model_path,
     "sae_init_dir": PATH_PARAMS.sae_init_dir,
-    "prompt_file": PATH_PARAMS.prompt_file,
+    "prompt_file": "./初始化/final_clean_prompts.txt",
     "run_dir": "sae_runs/pretrain",
     "log_file": "./logs/pretrain.log",
 }

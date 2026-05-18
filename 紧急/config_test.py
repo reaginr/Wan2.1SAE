@@ -1,14 +1,14 @@
 """
 参数测试阶段配置
 
-目的: 快速验证代码正确性、采样策略是否工作
-特点: 步数少、数据少、验证频繁、无预热
+目的: 验证代码正确性、采样策略有效性、训练收敛趋势
+特点: 中等数据量、中等步数、频繁验证、无预热
 
 使用:
     python run_train_layer_specific.py --config 紧急/config_test.py
 
 作者: Claude
-日期: 2026-05-17
+日期: 2026-05-18
 """
 
 from config import (
@@ -26,12 +26,14 @@ from config import (
 # ============================================================================
 
 # ========== 路径配置 ==========
-# 继承 config.py 的默认值，可在此覆盖
-# PATH_PARAMS.model_path = "/root/Wan2.1-T2V-1.3B"
+# 提示词文件 (统一来源)
+TEST_PATH_PARAMS = {
+    "prompt_file": "./初始化/final_clean_prompts.txt",
+}
 
 # ========== 训练配置 ==========
 TEST_TRAINING_PARAMS = {
-    # 训练步数: 少量验证
+    # 训练步数: 每层 100 步
     "steps": 100,
 
     # 预热步数: 不需要 (步数太少)
@@ -60,11 +62,11 @@ TEST_TRAINING_PARAMS = {
 
 # ========== 采样配置 (基础) ==========
 TEST_SAMPLING_PARAMS = {
-    # 每个 prompt 采样更少的 timestep
-    "num_timesteps_per_prompt": 3,
+    # 每个 prompt 采样的 timestep 数
+    "num_timesteps_per_prompt": 5,
 
-    # 每 timestep 更少的 token
-    "tokens_per_timestep": 512,
+    # 每 timestep 保留的 token 数
+    "tokens_per_timestep": 1024,
 
     # DiT 扩散步数
     "sampling_steps": 30,
@@ -81,7 +83,7 @@ TEST_PARAM_TEST_SAMPLING_PARAMS = {
     "sampling_mode": "param_test",
 
     # Timestep 采样
-    "num_timesteps_per_prompt": 3,
+    "num_timesteps_per_prompt": 5,
 
     # Temporal Chunk: 采样连续 2 帧
     "temporal_chunk_size": 2,
@@ -91,7 +93,7 @@ TEST_PARAM_TEST_SAMPLING_PARAMS = {
     "spatial_block_size": 8,
     "spatial_grid_h": 30,
     "spatial_grid_w": 52,
-    "num_spatial_blocks": 16,  # 测试阶段减少
+    "num_spatial_blocks": 24,
 
     # Norm Bias: 轻度偏向高 norm token
     "norm_bias_enabled": True,
@@ -102,7 +104,7 @@ TEST_PARAM_TEST_SAMPLING_PARAMS = {
     "decorrelation_threshold": 0.7,
 
     # 目标 token 数
-    "tokens_per_timestep": 512,
+    "tokens_per_timestep": 1024,
 }
 
 # ========== 验证配置 ==========
@@ -120,8 +122,8 @@ TEST_VALIDATION_PARAMS = {
 
 # ========== 数据配置 ==========
 TEST_DATA_PARAMS = {
-    # 提示词数量: 极少
-    "max_prompts": 10,
+    # 提示词数量: 100 条
+    "max_prompts": 100,
 
     # 随机种子
     "seed": 42,
@@ -129,8 +131,8 @@ TEST_DATA_PARAMS = {
 
 # ========== 日志配置 ==========
 TEST_LOG_PARAMS = {
-    # 每步都打印
-    "log_interval": 1,
+    # 每 5 步打印一次
+    "log_interval": 5,
 
     # 进度条
     "show_progress": True,
@@ -155,7 +157,7 @@ def get_test_config():
         # 路径
         "model_path": PATH_PARAMS.model_path,
         "sae_init_dir": PATH_PARAMS.sae_init_dir,
-        "prompt_file": PATH_PARAMS.prompt_file,
+        "prompt_file": TEST_PATH_PARAMS["prompt_file"],
         "run_dir": TEST_OUTPUT_PARAMS["run_dir"],
         "log_file": TEST_OUTPUT_PARAMS["log_file"],
 
@@ -216,8 +218,11 @@ if __name__ == "__main__":
     print("参数测试阶段配置")
     print("=" * 70)
 
+    print("\n[路径配置]")
+    print(f"  prompt_file: {TEST_PATH_PARAMS['prompt_file']}")
+
     print("\n[训练配置]")
-    print(f"  steps: {TEST_TRAINING_PARAMS['steps']}")
+    print(f"  steps: {TEST_TRAINING_PARAMS['steps']} (每层)")
     print(f"  warmup_steps: {TEST_TRAINING_PARAMS['warmup_steps']}")
     print(f"  batch_size: {TEST_TRAINING_PARAMS['batch_size']}")
     print(f"  accum_steps: {TEST_TRAINING_PARAMS['accum_steps']}")
@@ -240,9 +245,18 @@ if __name__ == "__main__":
 
     print("\n[数据配置]")
     print(f"  max_prompts: {TEST_DATA_PARAMS['max_prompts']}")
+    print(f"  训练层: 14, 19, 24, 29 (全部 4 层)")
 
     print("\n[验证配置]")
     print(f"  val_interval: {TEST_VALIDATION_PARAMS['val_interval']}")
     print(f"  checkpoint_interval: {TEST_VALIDATION_PARAMS['checkpoint_interval']}")
+
+    # 预估
+    print("\n[预估资源]")
+    total_records = TEST_DATA_PARAMS['max_prompts'] * 4 * TEST_SAMPLING_PARAMS['num_timesteps_per_prompt']
+    print(f"  激活记录数: {total_records} 条")
+    print(f"  激活提取时间: ~{TEST_DATA_PARAMS['max_prompts'] * 3} 分钟")
+    print(f"  训练时间 (4层×100步): ~{4 * 100 * 0.5 / 60:.0f} 分钟")
+    print(f"  总时间: ~{(TEST_DATA_PARAMS['max_prompts'] * 3 + 4 * 100 * 0.5 / 60):.0f} 分钟")
 
     print("=" * 70)
