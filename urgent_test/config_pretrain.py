@@ -5,7 +5,7 @@
 特点: 中等步数、中等数据、轻量预热、启用 EMA
 
 使用:
-    python run_train_layer_specific.py --config 紧急/config_pretrain.py
+    cd urgent_test && python run_train_layer_specific.py --config config_pretrain.py
 
 作者: Claude
 日期: 2026-05-17

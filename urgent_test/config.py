@@ -59,10 +59,10 @@ class PathConfig:
     """路径配置"""
 
     # Wan 模型路径
-    model_path: str = "/root/Wan2.1-T2V-1.3B"
+    model_path: str = "../Wan/Wan2.1-T2V-1.3B"
 
     # SAE 初始化权重目录
-    sae_init_dir: str = "/root/sae_init"
+    sae_init_dir: str = "./sae_init"
 
     # 提示词文件
     prompt_file: str = "./初始化/final_clean_prompts.txt"

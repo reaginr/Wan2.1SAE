@@ -3,21 +3,21 @@ Layer-wise SAE 训练脚本 - 符合 TODO_list_v4 规范
 
 使用统一配置文件 config.py，支持三阶段配置
 
-使用方法:
+使用方法 (从项目根目录运行):
     # 参数测试阶段 (快速验证代码正确性)
-    python run_train_layer_specific.py --config 紧急/config_test.py
+    python urgent_test/run_train_layer_specific.py --config urgent_test/config_test.py
 
     # 预训练阶段 (中等规模，验证超参数)
-    python run_train_layer_specific.py --config 紧急/config_pretrain.py
+    python urgent_test/run_train_layer_specific.py --config urgent_test/config_pretrain.py
 
     # 正式训练阶段 (完整训练)
-    python run_train_layer_specific.py --config 紧急/config_formal.py
+    python urgent_test/run_train_layer_specific.py --config urgent_test/config_formal.py
 
     # 命令行覆盖配置文件参数
-    python run_train_layer_specific.py --config 紧急/config_test.py --steps 200 --max_prompts 20
+    python urgent_test/run_train_layer_specific.py --config urgent_test/config_test.py --steps 200 --max_prompts 20
 
     # nohup 后台运行
-    nohup python -u run_train_layer_specific.py --config 紧急/config_formal.py \\
+    nohup python -u urgent_test/run_train_layer_specific.py --config urgent_test/config_formal.py \\
         > formal_train.log 2>&1 &
 
 三阶段说明:

@@ -5,7 +5,10 @@
 特点: 中等数据量、中等步数、频繁验证、无预热
 
 使用:
-    python run_train_layer_specific.py --config 紧急/config_test.py
+    cd urgent_test && python run_train_layer_specific.py --config config_test.py
+
+    # 或从项目根目录
+    python urgent_test/run_train_layer_specific.py --config urgent_test/config_test.py
 
 作者: Claude
 日期: 2026-05-18

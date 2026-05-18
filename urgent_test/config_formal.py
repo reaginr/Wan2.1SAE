@@ -5,7 +5,7 @@
 特点: 充足步数、完整数据、标准预热、完整 EMA
 
 使用:
-    python run_train_layer_specific.py --config 紧急/config_formal.py
+    cd urgent_test && python run_train_layer_specific.py --config config_formal.py
 
 作者: Claude
 日期: 2026-05-17
